@@ -1,68 +1,62 @@
 "use client";
 
-import { useMemo } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useSession } from "./useSession";
 
-type AppShellProps = {
+type Props = {
   children: React.ReactNode;
-  title?: string;
 };
 
-function NavLink({ href, label, active }: { href: string; label: string; active: boolean }) {
-  return (
-    <a
-      href={href}
-      className={`rounded-lg px-3 py-2 text-sm ${
-        active ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
-      }`}
-    >
-      {label}
-    </a>
-  );
-}
+const links = [
+  { href: "/", label: "Dashboard" },
+  { href: "/sites", label: "Sites" },
+  { href: "/imports", label: "Imports" },
+  { href: "/forecast", label: "Forecast" },
+  { href: "/login", label: "Login" },
+];
 
-export default function AppShell({ children, title }: AppShellProps) {
+export default function AppShell({ children }: Props) {
   const pathname = usePathname();
-  const { isAuthenticated, logout } = useSession();
+  const router = useRouter();
+  const { isAuthenticated, clearToken } = useSession();
 
-  const links = useMemo(
-    () => [
-      { href: "/", label: "Dashboard" },
-      { href: "/sites", label: "Sites" },
-      { href: "/imports", label: "Imports" },
-      { href: "/login", label: "Login" },
-    ],
-    []
-  );
+  function logout() {
+    clearToken();
+    router.push("/login");
+  }
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-2xl border bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="font-semibold">{title || "Decisio"}</div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {links.map((l) => (
-              <NavLink key={l.href} href={l.href} label={l.label} active={pathname === l.href} />
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <header className="border-b bg-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
+          <a href="/" className="font-semibold tracking-tight">
+            Decisio
+          </a>
+          <nav className="flex items-center gap-1 text-sm">
+            {links.map((link) => (
+              <a
+                key={link.href}
+                href={link.href}
+                className={`rounded-lg px-3 py-1.5 transition hover:bg-slate-100 ${
+                  pathname === link.href ? "bg-slate-100" : ""
+                }`}
+              >
+                {link.label}
+              </a>
             ))}
-
             {isAuthenticated ? (
               <button
-                className="rounded-lg border px-3 py-2 text-sm hover:bg-slate-50"
-                onClick={() => {
-                  logout();
-                  window.location.href = "/login";
-                }}
+                onClick={logout}
+                className="ml-2 rounded-lg border px-3 py-1.5 text-xs hover:bg-slate-50"
+                type="button"
               >
-                Se déconnecter
+                Logout
               </button>
             ) : null}
-          </div>
+          </nav>
         </div>
-      </div>
-
-      {children}
+      </header>
+      <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
     </div>
   );
 }

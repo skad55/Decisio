@@ -3,7 +3,7 @@ import csv
 import io
 from decimal import Decimal
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -14,7 +14,19 @@ from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import User, Site, Organisation, ImportBatch, ImportError, Sale
+from app.models import (
+    EventDaily,
+    ImportBatch,
+    ImportError,
+    Organisation,
+    Sale,
+    Site,
+    StaffingDaily,
+    TrafficDaily,
+    User,
+    WeatherDaily,
+)
+from app.ml_service import forecast_site, train_site_model
 from app.security import verify_password, create_access, decode
 
 
@@ -47,6 +59,10 @@ class SiteIn(BaseModel):
     surface_m2: int | None = None
     category: str | None = None
     hours_json: str | None = None
+
+
+class TrainIn(BaseModel):
+    site_id: str
 
 
 def get_db():
@@ -154,20 +170,10 @@ def _parse_iso_date(x: str) -> date:
     return date(int(y), int(m), int(d))
 
 
-@app.post("/api/import/ca")
-def import_ca(file: UploadFile = File(...), u=Depends(current_user), db=Depends(get_db)):
-    """
-    CSV attendu:
-    date,site,ca
-    - date = YYYY-MM-DD
-    - site = nom exact du site (déjà créé)
-    - ca = nombre (virgule ou point accepté)
-    """
-    filename = file.filename or "upload.csv"
-
+def _create_batch(db, org_id: str, batch_type: str, filename: str):
     batch = ImportBatch(
-        org_id=u.org_id,
-        type="sales_ca",
+        org_id=org_id,
+        type=batch_type,
         filename=filename,
         status="failed",
         rows_total=0,
@@ -178,57 +184,10 @@ def import_ca(file: UploadFile = File(...), u=Depends(current_user), db=Depends(
     db.add(batch)
     db.commit()
     db.refresh(batch)
+    return batch
 
-    content = file.file.read().decode("utf-8", errors="replace")
-    reader = csv.DictReader(io.StringIO(content))
 
-    site_by_name = {
-        s.name.strip().lower(): s
-        for s in db.execute(select(Site).where(Site.org_id == u.org_id)).scalars().all()
-    }
-
-    errors: list[tuple[int, str]] = []
-    ok = dup = failed = total = 0
-
-    for idx, r in enumerate(reader, start=2):
-        total += 1
-        try:
-            day_s = (r.get("date") or "").strip()
-            site_raw = (r.get("site") or "").strip()
-            site_key = site_raw.lower()
-            ca_s = (r.get("ca") or "").strip()
-
-            if not day_s or not site_key or not ca_s:
-                raise ValueError("missing required columns date/site/ca")
-
-            if site_key not in site_by_name:
-                raise ValueError(f"unknown site '{site_raw}' (create the site first)")
-
-            day = _parse_iso_date(day_s)
-            ca_s2 = ca_s.replace(",", ".")
-            revenue = Decimal(ca_s2)
-
-            sale = Sale(
-                org_id=u.org_id,
-                site_id=site_by_name[site_key].id,
-                day=day,
-                revenue_eur=revenue,
-                source_batch_id=batch.id,
-            )
-            db.add(sale)
-
-            try:
-                db.commit()
-                ok += 1
-            except IntegrityError:
-                db.rollback()
-                dup += 1
-
-        except Exception as e:
-            db.rollback()
-            failed += 1
-            errors.append((idx, str(e)))
-
+def _finalize_batch(db, batch: ImportBatch, total: int, ok: int, dup: int, failed: int, errors: list[tuple[int, str]]):
     batch.rows_total = total
     batch.rows_ok = ok
     batch.rows_duplicated = dup
@@ -243,7 +202,8 @@ def import_ca(file: UploadFile = File(...), u=Depends(current_user), db=Depends(
 
     return {
         "batch_id": batch.id,
-        "filename": filename,
+        "filename": batch.filename,
+        "type": batch.type,
         "status": batch.status,
         "rows_total": total,
         "rows_ok": ok,
@@ -251,6 +211,198 @@ def import_ca(file: UploadFile = File(...), u=Depends(current_user), db=Depends(
         "rows_failed": failed,
         "errors_preview": [{"row": rn, "error": msg} for rn, msg in errors[:10]],
     }
+
+
+def _site_map(db, org_id: str):
+    return {
+        s.name.strip().lower(): s
+        for s in db.execute(select(Site).where(Site.org_id == org_id)).scalars().all()
+    }
+
+
+@app.post("/api/import/ca")
+def import_ca(file: UploadFile = File(...), u=Depends(current_user), db=Depends(get_db)):
+    filename = file.filename or "upload.csv"
+    batch = _create_batch(db, u.org_id, "sales_ca", filename)
+
+    content = file.file.read().decode("utf-8", errors="replace")
+    reader = csv.DictReader(io.StringIO(content))
+    site_by_name = _site_map(db, u.org_id)
+
+    errors: list[tuple[int, str]] = []
+    ok = dup = failed = total = 0
+
+    for idx, r in enumerate(reader, start=2):
+        total += 1
+        try:
+            day_s = (r.get("date") or "").strip()
+            site_raw = (r.get("site") or "").strip()
+            site_key = site_raw.lower()
+            ca_s = (r.get("ca") or "").strip()
+
+            if not day_s or not site_key or not ca_s:
+                raise ValueError("missing required columns date/site/ca")
+            if site_key not in site_by_name:
+                raise ValueError(f"unknown site '{site_raw}' (create the site first)")
+
+            day = _parse_iso_date(day_s)
+            revenue = Decimal(ca_s.replace(",", "."))
+
+            db.add(
+                Sale(
+                    org_id=u.org_id,
+                    site_id=site_by_name[site_key].id,
+                    day=day,
+                    revenue_eur=revenue,
+                    source_batch_id=batch.id,
+                )
+            )
+            try:
+                db.commit()
+                ok += 1
+            except IntegrityError:
+                db.rollback()
+                dup += 1
+
+        except Exception as e:
+            db.rollback()
+            failed += 1
+            errors.append((idx, str(e)))
+
+    return _finalize_batch(db, batch, total, ok, dup, failed, errors)
+
+
+def _import_variable_rows(db, u: User, file: UploadFile, batch_type: str, handler):
+    filename = file.filename or "upload.csv"
+    batch = _create_batch(db, u.org_id, batch_type, filename)
+    content = file.file.read().decode("utf-8", errors="replace")
+    reader = csv.DictReader(io.StringIO(content))
+    site_by_name = _site_map(db, u.org_id)
+
+    errors: list[tuple[int, str]] = []
+    ok = dup = failed = total = 0
+
+    for idx, r in enumerate(reader, start=2):
+        total += 1
+        try:
+            day = _parse_iso_date((r.get("date") or "").strip())
+            site_raw = (r.get("site") or "").strip()
+            if not site_raw:
+                raise ValueError("missing site")
+            site = site_by_name.get(site_raw.lower())
+            if not site:
+                raise ValueError(f"unknown site '{site_raw}'")
+
+            obj = handler(r, day, site.id, batch.id)
+            db.add(obj)
+            try:
+                db.commit()
+                ok += 1
+            except IntegrityError:
+                db.rollback()
+                dup += 1
+        except Exception as e:
+            db.rollback()
+            failed += 1
+            errors.append((idx, str(e)))
+
+    return _finalize_batch(db, batch, total, ok, dup, failed, errors)
+
+
+@app.post("/api/import/weather")
+def import_weather(file: UploadFile = File(...), u=Depends(current_user), db=Depends(get_db)):
+    return _import_variable_rows(
+        db,
+        u,
+        file,
+        "weather",
+        lambda r, day, site_id, batch_id: WeatherDaily(
+            org_id=u.org_id,
+            site_id=site_id,
+            day=day,
+            temp_c=float((r.get("temp_c") or "15").replace(",", ".")),
+            rain_mm=float((r.get("rain_mm") or "0").replace(",", ".")),
+            source_batch_id=batch_id,
+        ),
+    )
+
+
+@app.post("/api/import/traffic")
+def import_traffic(file: UploadFile = File(...), u=Depends(current_user), db=Depends(get_db)):
+    return _import_variable_rows(
+        db,
+        u,
+        file,
+        "traffic",
+        lambda r, day, site_id, batch_id: TrafficDaily(
+            org_id=u.org_id,
+            site_id=site_id,
+            day=day,
+            traffic_index=float((r.get("traffic_index") or "100").replace(",", ".")),
+            source_batch_id=batch_id,
+        ),
+    )
+
+
+@app.post("/api/import/staffing")
+def import_staffing(file: UploadFile = File(...), u=Depends(current_user), db=Depends(get_db)):
+    return _import_variable_rows(
+        db,
+        u,
+        file,
+        "staffing",
+        lambda r, day, site_id, batch_id: StaffingDaily(
+            org_id=u.org_id,
+            site_id=site_id,
+            day=day,
+            staff_count=int(r.get("staff_count") or "0"),
+            source_batch_id=batch_id,
+        ),
+    )
+
+
+@app.post("/api/import/events")
+def import_events(file: UploadFile = File(...), u=Depends(current_user), db=Depends(get_db)):
+    filename = file.filename or "upload.csv"
+    batch = _create_batch(db, u.org_id, "events", filename)
+
+    content = file.file.read().decode("utf-8", errors="replace")
+    reader = csv.DictReader(io.StringIO(content))
+    site_by_name = _site_map(db, u.org_id)
+    errors: list[tuple[int, str]] = []
+    ok = dup = failed = total = 0
+
+    for idx, r in enumerate(reader, start=2):
+        total += 1
+        try:
+            day = _parse_iso_date((r.get("date") or "").strip())
+            site_raw = (r.get("site") or "").strip()
+            site_id = None
+            if site_raw:
+                site = site_by_name.get(site_raw.lower())
+                if not site:
+                    raise ValueError(f"unknown site '{site_raw}'")
+                site_id = site.id
+
+            db.add(
+                EventDaily(
+                    org_id=u.org_id,
+                    site_id=site_id,
+                    day=day,
+                    event_type=(r.get("event_type") or "event").strip() or "event",
+                    label=(r.get("label") or "").strip() or None,
+                    intensity=float((r.get("intensity") or "1").replace(",", ".")),
+                    source_batch_id=batch.id,
+                )
+            )
+            db.commit()
+            ok += 1
+        except Exception as e:
+            db.rollback()
+            failed += 1
+            errors.append((idx, str(e)))
+
+    return _finalize_batch(db, batch, total, ok, dup, failed, errors)
 
 
 @app.get("/api/imports")
@@ -279,6 +431,37 @@ def list_imports(u=Depends(current_user), db=Depends(get_db)):
     ]
 
 
+@app.post("/api/model/train")
+def train_model(payload: TrainIn, u=Depends(current_user), db=Depends(get_db)):
+    try:
+        run = train_site_model(db, u.org_id, payload.site_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "model_run_id": run.id,
+        "site_id": run.site_id,
+        "model_name": run.model_name,
+        "train_rows": run.train_rows,
+        "mae": run.mae,
+        "mape": run.mape,
+    }
+
+
+@app.get("/api/forecast")
+def api_forecast(
+    site_id: str = Query(...),
+    horizon_days: int = Query(7),
+    model_run_id: str | None = Query(None),
+    u=Depends(current_user),
+    db=Depends(get_db),
+):
+    try:
+        return forecast_site(db, u.org_id, site_id, horizon_days, model_run_id=model_run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/kpis")
 def kpis(u=Depends(current_user), db=Depends(get_db)):
     org = db.execute(select(Organisation).where(Organisation.id == u.org_id)).scalar_one()
@@ -287,18 +470,13 @@ def kpis(u=Depends(current_user), db=Depends(get_db)):
         select(func.coalesce(func.sum(Sale.revenue_eur), 0)).where(Sale.org_id == u.org_id)
     ).scalar_one()
 
-    # étape 1: pas encore de prédictions => baseline
-    ca_pred = float(ca_real)
-    mape = 0.0
-    mae = 0.0
-
     return {
         "org": {"id": org.id, "name": org.name},
         "kpis": {
             "ca_real_eur": float(ca_real),
-            "ca_pred_eur": float(ca_pred),
-            "mape": float(mape),
-            "mae": float(mae),
+            "ca_pred_eur": float(ca_real),
+            "mape": 0.0,
+            "mae": 0.0,
         },
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
