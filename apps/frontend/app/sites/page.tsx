@@ -1,46 +1,99 @@
 "use client";
-import { useEffect, useState } from "react";
 
-export default function Sites() {
-  const [sites, setSites] = useState<any[]>([]);
+import { useEffect, useState } from "react";
+import AppShell from "../../components/AppShell";
+import { apiCreateSite, apiSites, type Site } from "../../components/api";
+import { useSession } from "../../components/useSession";
+
+export default function SitesPage() {
+  const [sites, setSites] = useState<Site[]>([]);
   const [name, setName] = useState("Nouveau site");
   const [address, setAddress] = useState("Adresse");
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
 
+  const { token, ready } = useSession();
   const base = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
   async function load() {
-    const token = localStorage.getItem("access") || "";
-    const r = await fetch(base + "/api/sites", { headers: { Authorization: "Bearer " + token }});
-    if (!r.ok) throw new Error(await r.text());
-    setSites(await r.json());
+    if (!token) return;
+    setErr("");
+    const list = await apiSites(token, base);
+    setSites(list);
   }
 
   async function create() {
-    const token = localStorage.getItem("access") || "";
-    const r = await fetch(base + "/api/sites", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-      body: JSON.stringify({ name, address }),
-    });
-    if (!r.ok) { setErr(await r.text()); return; }
-    await load();
+    if (!token) {
+      setErr("Non connecté. Va sur /login.");
+      return;
+    }
+
+    setBusy(true);
+    setErr("");
+    try {
+      await apiCreateSite(token, { name, address }, base);
+      await load();
+    } catch (error: any) {
+      setErr(String(error?.message || error));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  useEffect(()=>{ load().catch(e=>setErr(String(e))); }, []);
+  useEffect(() => {
+    if (!ready) return;
+    if (!token) {
+      window.location.href = "/login";
+      return;
+    }
+    load().catch((e) => setErr(String(e?.message || e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, token]);
 
   return (
-    <div>
-      <h1>Sites</h1>
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-        <input value={name} onChange={(e)=>setName(e.target.value)} />
-        <input value={address} onChange={(e)=>setAddress(e.target.value)} />
-        <button onClick={create}>Créer</button>
+    <AppShell title="Sites">
+      <div className="rounded-2xl border bg-white p-5 shadow-sm">
+        <h1 className="text-xl font-semibold">Sites</h1>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <input
+            className="rounded-xl border px-3 py-2 text-sm"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Nom du site"
+          />
+          <input
+            className="rounded-xl border px-3 py-2 text-sm"
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+            placeholder="Adresse"
+          />
+          <button
+            onClick={create}
+            disabled={busy}
+            className="rounded-xl border bg-white px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50"
+          >
+            {busy ? "Création..." : "Créer"}
+          </button>
+        </div>
+
+        {err ? (
+          <pre className="mt-3 whitespace-pre-wrap rounded-xl border bg-rose-50 p-3 text-sm text-rose-900">
+            {err}
+          </pre>
+        ) : null}
+
+        <ul className="mt-4 space-y-2">
+          {sites.map((s) => (
+            <li key={s.id} className="rounded-xl border bg-slate-50 px-3 py-2 text-sm">
+              <b>{s.name}</b> — {s.address}
+            </li>
+          ))}
+          {sites.length === 0 ? (
+            <li className="rounded-xl border px-3 py-2 text-sm text-slate-500">Aucun site.</li>
+          ) : null}
+        </ul>
       </div>
-      {err && <pre style={{ color: "crimson", whiteSpace: "pre-wrap" }}>{err}</pre>}
-      <ul>
-        {sites.map(s => <li key={s.id}><b>{s.name}</b> — {s.address}</li>)}
-      </ul>
-    </div>
+    </AppShell>
   );
 }
