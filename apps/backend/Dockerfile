@@ -15,4 +15,6 @@ COPY . /app
 
 EXPOSE 8000
 
-CMD ["bash","-lc","alembic upgrade head && python -m app.db_init && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+RUN chmod +x /app/scripts/backend_start.sh
+
+CMD ["/app/scripts/backend_start.sh"]
