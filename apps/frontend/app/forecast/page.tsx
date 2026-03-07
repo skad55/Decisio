@@ -1,133 +1,281 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { forecast, ForecastPayload, getSites, Site, trainModel, TrainResponse } from "../../components/api";
+import AppShell from "../../components/AppShell";
+import {
+  forecast,
+  ForecastPayload,
+  getSites,
+  Site,
+  trainModel,
+  TrainResponse,
+} from "../../components/api";
 import { useSession } from "../../components/useSession";
-
-function euro(value: number) {
-  return new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" }).format(value);
-}
 
 export default function ForecastPage() {
   const { token, ready } = useSession();
+
   const [sites, setSites] = useState<Site[]>([]);
-  const [siteId, setSiteId] = useState("");
-  const [training, setTraining] = useState<TrainResponse | null>(null);
+  const [siteId, setSiteId] = useState<string>("");
+
+  const [training, setTraining] = useState(false);
+  const [forecasting, setForecasting] = useState(false);
+
+  const [trainResult, setTrainResult] = useState<TrainResponse | null>(null);
   const [forecast7, setForecast7] = useState<ForecastPayload | null>(null);
   const [forecast30, setForecast30] = useState<ForecastPayload | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+
+  const [err, setErr] = useState("");
 
   useEffect(() => {
+    if (!ready) return;
+
+    if (!token) {
+      window.location.href = "/login";
+      return;
+    }
+
     async function loadSites() {
-      if (!token) return;
       try {
+        setErr("");
         const rows = await getSites(token);
         setSites(rows);
-        if (!siteId && rows.length > 0) {
+
+        if (rows.length > 0) {
           setSiteId(rows[0].id);
         }
-      } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : "Erreur inattendue");
+      } catch (error: any) {
+        setErr(String(error?.message || error));
       }
     }
 
-    if (ready) {
-      loadSites();
-    }
-  }, [ready, token, siteId]);
+    loadSites();
+  }, [ready, token]);
 
-  async function onTrainAndForecast() {
-    if (!token || !siteId) {
-      setError("Sélectionnez un site et connectez-vous.");
+  async function onTrain() {
+    if (!token) {
+      setErr("Non connecté.");
       return;
     }
-    setBusy(true);
-    setError("");
-    setTraining(null);
-    setForecast7(null);
-    setForecast30(null);
+    if (!siteId) {
+      setErr("Aucun site sélectionné.");
+      return;
+    }
 
     try {
-          const trainRes = await trainModel(token, siteId);
-      setTraining(trainRes);
+      setTraining(true);
+      setErr("");
+      setTrainResult(null);
 
-      const f7 = await forecast(token, siteId, 7);
-      setForecast7(f7);
-
-      const f30 = await forecast(token, siteId, 30);
-      setForecast30(f30);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Erreur inattendue");
+      const result = await trainModel(token, siteId);
+      setTrainResult(result);
+    } catch (error: any) {
+      setErr(String(error?.message || error));
     } finally {
-      setBusy(false);
+      setTraining(false);
     }
   }
 
-  return (
-    <div className="space-y-6">
-      <section className="rounded-2xl border bg-white p-5 shadow-sm">
-        <h1 className="text-xl font-semibold">Forecast IA</h1>
-        <p className="mt-1 text-sm text-slate-600">
-          Entraînement local (régression linéaire) avec variables : météo, trafic, staffing, événements, calendrier, lags, caractéristiques site.
-        </p>
+  async function onRunForecasts() {
+    if (!token) {
+      setErr("Non connecté.");
+      return;
+    }
+    if (!siteId) {
+      setErr("Aucun site sélectionné.");
+      return;
+    }
 
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <select
-            className="rounded-xl border px-3 py-2 text-sm"
-            value={siteId}
-            onChange={(e) => setSiteId(e.target.value)}
-          >
-            {sites.map((s) => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-          </select>
-          <button
-            className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
-            onClick={onTrainAndForecast}
-            disabled={busy || !siteId || !token}
-            type="button"
-          >
-            {busy ? "Calcul en cours..." : "Entraîner + Prévoir J+7/J+30"}
-          </button>
+    try {
+      setForecasting(true);
+      setErr("");
+      setForecast7(null);
+      setForecast30(null);
+
+      const f7 = await forecast(token, siteId, 7);
+      const f30 = await forecast(token, siteId, 30);
+
+      setForecast7(f7);
+      setForecast30(f30);
+    } catch (error: any) {
+      setErr(String(error?.message || error));
+    } finally {
+      setForecasting(false);
+    }
+  }
+
+  async function onTrainAndForecast() {
+    await onTrain();
+    await onRunForecasts();
+  }
+
+  return (
+    <AppShell>
+      <div className="space-y-6">
+        <div className="rounded-2xl border bg-white p-5 shadow-sm">
+          <h1 className="text-xl font-semibold">Forecast IA</h1>
+          <p className="mt-2 text-sm text-slate-600">
+            Entraîne le modèle sur les données du site sélectionné puis génère les
+            prévisions J+7 et J+30.
+          </p>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="mb-2 block text-sm font-medium">Site</label>
+              <select
+                className="w-full rounded-xl border px-3 py-2 text-sm"
+                value={siteId}
+                onChange={(e) => setSiteId(e.target.value)}
+              >
+                {sites.map((site) => (
+                  <option key={site.id} value={site.id}>
+                    {site.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={onTrain}
+              disabled={training || forecasting || !siteId}
+              className="rounded-xl border bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50"
+            >
+              {training ? "Training..." : "Train model"}
+            </button>
+
+            <button
+              type="button"
+              onClick={onRunForecasts}
+              disabled={training || forecasting || !siteId}
+              className="rounded-xl border bg-white px-4 py-2 text-sm hover:bg-slate-50 disabled:opacity-50"
+            >
+              {forecasting ? "Forecast..." : "Run forecast"}
+            </button>
+
+            <button
+              type="button"
+              onClick={onTrainAndForecast}
+              disabled={training || forecasting || !siteId}
+              className="rounded-xl border bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {training || forecasting ? "Processing..." : "Train + Forecast"}
+            </button>
+          </div>
+
+          {err ? (
+            <div className="mt-4 rounded-xl border bg-rose-50 p-3 text-sm text-rose-900 whitespace-pre-wrap">
+              {err}
+            </div>
+          ) : null}
+
+          {trainResult ? (
+            <div className="mt-4 rounded-xl border bg-slate-50 p-4">
+              <div className="text-sm font-semibold">Train result</div>
+              <div className="mt-3 grid gap-2 text-sm md:grid-cols-2">
+                <div>Model run ID</div>
+                <div className="font-mono text-xs break-all">{trainResult.model_run_id}</div>
+                <div>Site ID</div>
+                <div className="font-mono text-xs break-all">{trainResult.site_id}</div>
+                <div>Model</div>
+                <div>{trainResult.model_name}</div>
+                <div>Train rows</div>
+                <div>{trainResult.train_rows}</div>
+                <div>MAE</div>
+                <div>{trainResult.mae}</div>
+                <div>MAPE</div>
+                <div>{trainResult.mape}</div>
+              </div>
+            </div>
+          ) : null}
         </div>
 
-        {error ? <div className="mt-3 rounded-xl border bg-rose-50 p-3 text-sm text-rose-900">{error}</div> : null}
-      </section>
-
-      {training ? (
-        <section className="rounded-2xl border bg-white p-5 shadow-sm text-sm">
-          <div className="font-semibold">Dernier entraînement</div>
-          <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
-            <div>Model: <span className="font-mono">{training.model_name}</span></div>
-            <div>Lignes train: {training.train_rows}</div>
-            <div>MAE: {euro(training.mae)} | MAPE: {(training.mape * 100).toFixed(2)}%</div>
-          </div>
-        </section>
-      ) : null}
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {([forecast7, forecast30] as const).map((block, idx) => (
-          <section key={idx} className="rounded-2xl border bg-white p-5 shadow-sm">
-            <div className="text-sm font-semibold">Prévision {block ? `J+${block.horizon_days}` : "—"}</div>
-            <div className="mt-1 text-sm text-slate-600">Total prédit: {block ? euro(block.sum_predicted_eur) : "—"}</div>
-            {block ? (
-              <div className="mt-2 overflow-auto">
-                <table className="w-full text-sm">
-                  <thead className="text-left text-slate-500">
-                    <tr><th className="py-2">Date</th><th className="py-2">CA prédit</th></tr>
-                  </thead>
-                  <tbody>
-                    {block.forecast.map((p) => (
-                      <tr key={p.day} className="border-t"><td className="py-2">{p.day}</td><td className="py-2">{euro(p.predicted_revenue_eur)}</td></tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-          </section>
+          <div key={idx} className="rounded-2xl border bg-white p-5 shadow-sm">
+            <h2 className="text-lg font-semibold">
+              {idx === 0 ? "Forecast J+7" : "Forecast J+30"}
+            </h2>
+
+            {!block ? (
+              <p className="mt-3 text-sm text-slate-500">
+                Aucun forecast généré pour le moment.
+              </p>
+            ) : (
+              <>
+                <div className="mt-3 grid gap-2 text-sm md:grid-cols-2">
+                  {"model_run_id" in block ? (
+                    <>
+                      <div>Model run ID</div>
+                      <div className="font-mono text-xs break-all">
+                        {(block as any).model_run_id}
+                      </div>
+                    </>
+                  ) : null}
+
+                  {"site_id" in block ? (
+                    <>
+                      <div>Site ID</div>
+                      <div className="font-mono text-xs break-all">
+                        {(block as any).site_id}
+                      </div>
+                    </>
+                  ) : null}
+
+                  {"horizon_days" in block ? (
+                    <>
+                      <div>Horizon</div>
+                      <div>{(block as any).horizon_days} jours</div>
+                    </>
+                  ) : null}
+                </div>
+
+                <div className="mt-4 overflow-auto">
+                  <table className="w-full text-sm">
+                    <thead className="text-left text-slate-500">
+                      <tr>
+                        <th className="py-2">Date</th>
+                        <th className="py-2">Forecast (€)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {block.forecast.map((p) => (
+                        <tr key={p.day} className="border-t">
+                          <td className="py-2">{p.day}</td>
+                          <td className="py-2">
+                            {Number(p.predicted_revenue_eur).toLocaleString("fr-FR", {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}{" "}
+                            €
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {(block as any).insights && Array.isArray((block as any).insights) ? (
+                  <div className="mt-4 rounded-xl border bg-slate-50 p-4">
+                    <div className="text-sm font-semibold">AI Insights</div>
+                    <div className="mt-3 space-y-2">
+                      {(block as any).insights.map((insight: string, i: number) => (
+                        <div
+                          key={i}
+                          className="rounded-lg border bg-white px-3 py-2 text-sm text-slate-700"
+                        >
+                          {insight}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
         ))}
       </div>
-    </div>
+    </AppShell>
   );
 }
