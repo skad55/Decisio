@@ -16,6 +16,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.models import (
     EventDaily,
+    ForecastPoint,
     ImportBatch,
     ImportError,
     Organisation,
@@ -479,4 +480,42 @@ def kpis(u=Depends(current_user), db=Depends(get_db)):
             "mae": 0.0,
         },
         "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/sites/{site_id}/dashboard")
+def dashboard(site_id: str, u=Depends(current_user), db=Depends(get_db)):
+    sales_rows = (
+        db.execute(
+            select(Sale.day, Sale.revenue_eur)
+            .where(
+                Sale.org_id == u.org_id,
+                Sale.site_id == site_id,
+            )
+            .order_by(Sale.day)
+        )
+        .all()
+    )
+
+    forecast_rows = (
+        db.execute(
+            select(ForecastPoint.day, ForecastPoint.predicted_revenue_eur)
+            .where(
+                ForecastPoint.org_id == u.org_id,
+                ForecastPoint.site_id == site_id,
+            )
+            .order_by(ForecastPoint.day)
+        )
+        .all()
+    )
+
+    return {
+        "historical": [
+            {"day": day.isoformat(), "revenue": float(revenue)}
+            for day, revenue in sales_rows
+        ],
+        "forecast": [
+            {"day": day.isoformat(), "prediction": float(prediction)}
+            for day, prediction in forecast_rows
+        ],
     }

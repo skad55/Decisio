@@ -8,7 +8,7 @@ type Props = {
 };
 
 const links = [
-  { href: "/", label: "Dashboard" },
+  { href: "/dashboard", label: "Dashboard" },
   { href: "/sites", label: "Sites" },
   { href: "/imports", label: "Imports" },
   { href: "/forecast", label: "Forecast" },
@@ -29,7 +29,7 @@ export default function AppShell({ children }: Props) {
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <header className="border-b bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-          <a href="/" className="font-semibold tracking-tight">
+          <a href="/dashboard" className="font-semibold tracking-tight">
             Decisio
           </a>
           <nav className="flex items-center gap-1 text-sm">
