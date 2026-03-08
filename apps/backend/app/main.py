@@ -19,6 +19,7 @@ from app.models import (
     ForecastPoint,
     ImportBatch,
     ImportError,
+    ModelRun,
     Organisation,
     Sale,
     Site,
@@ -518,4 +519,101 @@ def dashboard(site_id: str, u=Depends(current_user), db=Depends(get_db)):
             {"day": day.isoformat(), "prediction": float(prediction)}
             for day, prediction in forecast_rows
         ],
+    }
+class SimulationIn(BaseModel):
+    traffic_delta_pct: float = 0.0
+    staff_delta: float = 0.0
+    event_intensity_delta: float = 0.0
+    rain_delta_mm: float = 0.0
+
+
+@app.post("/api/sites/{site_id}/simulate")
+def simulate(site_id: str, payload: SimulationIn, u=Depends(current_user), db=Depends(get_db)):
+    latest_forecast_row = (
+        db.execute(
+            select(ForecastPoint.predicted_revenue_eur)
+            .where(
+                ForecastPoint.org_id == u.org_id,
+                ForecastPoint.site_id == site_id,
+            )
+            .order_by(ForecastPoint.day.desc())
+        )
+        .first()
+    )
+
+    if not latest_forecast_row:
+        raise HTTPException(status_code=404, detail="No forecast found for this site")
+
+    latest_model_run_row = (
+        db.execute(
+            select(ModelRun.weights_json, ModelRun.features_json)
+            .where(
+                ModelRun.org_id == u.org_id,
+                ModelRun.site_id == site_id,
+            )
+            .order_by(ModelRun.id.desc())
+        )
+        .first()
+    )
+
+    if not latest_model_run_row:
+        raise HTTPException(status_code=404, detail="No model run found for this site")
+
+    base_forecast = float(latest_forecast_row[0])
+
+    import json
+
+    weights_json = latest_model_run_row[0]
+    features_json = latest_model_run_row[1]
+
+    try:
+        weights = json.loads(weights_json) if weights_json else {}
+    except Exception:
+        weights = {}
+
+    try:
+        features = json.loads(features_json) if features_json else []
+    except Exception:
+        features = []
+
+    def resolve_weight(names: list[str], default: float = 0.0) -> float:
+        if isinstance(weights, dict):
+            for name in names:
+                if name in weights:
+                    try:
+                        return float(weights[name])
+                    except Exception:
+                        pass
+
+        if isinstance(weights, list) and isinstance(features, list):
+            for idx, feat in enumerate(features):
+                if feat in names and idx < len(weights):
+                    try:
+                        return float(weights[idx])
+                    except Exception:
+                        pass
+
+        return default
+
+    traffic_weight = resolve_weight(["traffic", "traffic_index"], 0.002)
+    staff_weight = resolve_weight(["staff", "staff_count"], 0.03)
+    rain_weight = resolve_weight(["rain", "rain_mm"], -0.01)
+    events_weight = resolve_weight(["events", "event_intensity", "intensity"], 0.05)
+
+    impact = (
+        traffic_weight * (payload.traffic_delta_pct / 100.0)
+        + staff_weight * payload.staff_delta
+        + events_weight * payload.event_intensity_delta
+        + rain_weight * payload.rain_delta_mm
+    )
+
+    simulated_revenue = base_forecast * (1 + impact)
+    delta_value = simulated_revenue - base_forecast
+    delta_pct = 0.0 if base_forecast == 0 else (delta_value / base_forecast) * 100.0
+
+    return {
+        "base_forecast": round(base_forecast, 2),
+        "simulated_revenue": round(simulated_revenue, 2),
+        "delta_value": round(delta_value, 2),
+        "delta_pct": round(delta_pct, 2),
     }
