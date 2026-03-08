@@ -45,20 +45,19 @@ export default function DashboardPage() {
   return (
     <AppShell>
       <div className="space-y-6">
+
         <section className="rounded-2xl border bg-white p-5 shadow-sm">
           <h1 className="text-xl font-semibold">Dashboard</h1>
           <p className="mt-2 text-sm text-slate-600">
-            Vue rapide de l’état du SaaS et des indicateurs principaux.
+            Vue synthétique de l’état technique et business du SaaS.
           </p>
         </section>
 
         <section className="rounded-2xl border bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold text-slate-900">System health</h2>
-          <p className="mt-1 text-sm text-slate-600">
-            Lecture rapide de l’état général du SaaS.
-          </p>
 
           <div className="mt-4 grid gap-4 md:grid-cols-4">
+
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
               <div className="text-xs uppercase text-emerald-700">API</div>
               <div className="mt-1 text-lg font-semibold text-emerald-900">
@@ -81,11 +80,12 @@ export default function DashboardPage() {
             </div>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs uppercase text-slate-600">Status</div>
+              <div className="text-xs uppercase text-slate-600">System</div>
               <div className="mt-1 text-lg font-semibold text-slate-900">
                 {health?.ok ? "Operational" : "Check API"}
               </div>
             </div>
+
           </div>
         </section>
 
@@ -94,13 +94,14 @@ export default function DashboardPage() {
 
           {!kpis ? (
             <div className="mt-3 text-sm text-slate-500">
-              Aucun KPI disponible pour le moment.
+              Aucun KPI disponible.
             </div>
           ) : (
-            <div className="mt-4 grid gap-4 md:grid-cols-3">
+            <div className="mt-4 grid gap-4 md:grid-cols-4">
+
               <div className="rounded-xl border bg-slate-50 p-4">
                 <div className="text-xs uppercase text-slate-600">
-                  Revenue last 7 days
+                  Revenue 7 days
                 </div>
                 <div className="mt-1 text-xl font-semibold">
                   {Number(kpis.revenue_last_7_days).toLocaleString("fr-FR")} €
@@ -109,7 +110,7 @@ export default function DashboardPage() {
 
               <div className="rounded-xl border bg-slate-50 p-4">
                 <div className="text-xs uppercase text-slate-600">
-                  Revenue last 30 days
+                  Revenue 30 days
                 </div>
                 <div className="mt-1 text-xl font-semibold">
                   {Number(kpis.revenue_last_30_days).toLocaleString("fr-FR")} €
@@ -118,12 +119,22 @@ export default function DashboardPage() {
 
               <div className="rounded-xl border bg-slate-50 p-4">
                 <div className="text-xs uppercase text-slate-600">
-                  Active sites
+                  Sites
                 </div>
                 <div className="mt-1 text-xl font-semibold">
                   {kpis.sites_count}
                 </div>
               </div>
+
+              <div className="rounded-xl border bg-slate-50 p-4">
+                <div className="text-xs uppercase text-slate-600">
+                  Data readiness
+                </div>
+                <div className="mt-1 text-xl font-semibold">
+                  {kpis.revenue_last_30_days > 0 ? "Data available" : "No data"}
+                </div>
+              </div>
+
             </div>
           )}
         </section>
@@ -133,6 +144,7 @@ export default function DashboardPage() {
             {err}
           </div>
         ) : null}
+
       </div>
     </AppShell>
   );
