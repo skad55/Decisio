@@ -85,6 +85,20 @@ export type ForecastPayload = {
   forecast: ForecastPoint[];
   sum_predicted_eur: number;
 };
+export type BacktestRow = {
+  day: string;
+  real: number;
+  pred: number;
+  error: number;
+};
+
+export type BacktestPayload = {
+  site_id: string;
+  horizon_days: number;
+  mae: number;
+  mape: number;
+  rows: BacktestRow[];
+};
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
@@ -248,4 +262,24 @@ export async function forecast(
     cache: "no-store",
   });
   return parseJson<ForecastPayload>(response);
+}
+export async function backtest(
+  token: string,
+  site_id: string,
+  horizon_days: 7 | 30
+): Promise<BacktestPayload> {
+  const params = new URLSearchParams({
+    site_id,
+    horizon_days: String(horizon_days),
+  });
+
+  const response = await fetch(
+    `${API_BASE}/api/backtest?${params.toString()}`,
+    {
+      headers: authHeaders(token),
+      cache: "no-store",
+    }
+  );
+
+  return parseJson<BacktestPayload>(response);
 }
