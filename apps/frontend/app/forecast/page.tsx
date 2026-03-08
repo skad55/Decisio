@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import AppShell from "../../components/AppShell";
+import ForecastChart from "../../components/ForecastChart";
 import {
   forecast,
   ForecastPayload,
@@ -532,6 +533,13 @@ export default function ForecastPage() {
                       value={euro(avg)}
                       subtitle="Projection journalière moyenne"
                       tone="default"
+                    />
+                  </div>
+
+                  <div className="mt-4">
+                    <ForecastChart
+                      title={`${title} — évolution prévisionnelle`}
+                      points={meta.forecast}
                     />
                   </div>
 
