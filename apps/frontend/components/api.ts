@@ -58,6 +58,18 @@ export type TrainResponse = {
   mape: number;
 };
 
+export type ForecastWeather = {
+  temp_c?: number | null;
+  rain_mm?: number | null;
+  source?: string | null;
+};
+
+export type ForecastPoint = {
+  day: string;
+  predicted_revenue_eur: number;
+  weather?: ForecastWeather;
+};
+
 export type ForecastPayload = {
   site_id: string;
   site_name: string;
@@ -70,7 +82,7 @@ export type ForecastPayload = {
     mape: number;
     features: string[];
   };
-  forecast: Array<{ day: string; predicted_revenue_eur: number }>;
+  forecast: ForecastPoint[];
   sum_predicted_eur: number;
 };
 
@@ -216,8 +228,21 @@ export async function trainModel(token: string, site_id: string): Promise<TrainR
   return parseJson<TrainResponse>(response);
 }
 
-export async function forecast(token: string, site_id: string, horizon_days: 7 | 30): Promise<ForecastPayload> {
-  const params = new URLSearchParams({ site_id, horizon_days: String(horizon_days) });
+export async function forecast(
+  token: string,
+  site_id: string,
+  horizon_days: 7 | 30,
+  model_run_id?: string
+): Promise<ForecastPayload> {
+  const params = new URLSearchParams({
+    site_id,
+    horizon_days: String(horizon_days),
+  });
+
+  if (model_run_id) {
+    params.set("model_run_id", model_run_id);
+  }
+
   const response = await fetch(`${API_BASE}/api/forecast?${params.toString()}`, {
     headers: authHeaders(token),
     cache: "no-store",

@@ -123,6 +123,11 @@ type ForecastBlockMeta = {
   forecast: Array<{
     day: string;
     predicted_revenue_eur: number | string;
+    weather?: {
+      temp_c?: number | null;
+      rain_mm?: number | null;
+      source?: string | null;
+    };
   }>;
 };
 
@@ -262,8 +267,10 @@ export default function ForecastPage() {
       setForecast7(null);
       setForecast30(null);
 
-      const f7 = await forecast(token, siteId, 7);
-      const f30 = await forecast(token, siteId, 30);
+      const modelRunId = trainResult?.model_run_id;
+
+      const f7 = await forecast(token, siteId, 7, modelRunId);
+      const f30 = await forecast(token, siteId, 30, modelRunId);
 
       setForecast7(f7);
       setForecast30(f30);
@@ -295,8 +302,8 @@ export default function ForecastPage() {
       const result = await trainModel(token, siteId);
       setTrainResult(result);
 
-      const f7 = await forecast(token, siteId, 7);
-      const f30 = await forecast(token, siteId, 30);
+      const f7 = await forecast(token, siteId, 7, result.model_run_id);
+      const f30 = await forecast(token, siteId, 30, result.model_run_id);
 
       setForecast7(f7);
       setForecast30(f30);
@@ -477,7 +484,7 @@ export default function ForecastPage() {
             value={summary.hasTrain ? "OK" : training ? "..." : "—"}
             subtitle={
               summary.hasTrain
-                ? "Dernier entraînement disponible"
+                ? `${trainResult?.model_name ?? "Modèle entraîné"}`
                 : "Aucun résultat d’entraînement"
             }
             tone={summary.hasTrain ? "good" : training ? "info" : "warn"}
@@ -592,7 +599,11 @@ export default function ForecastPage() {
           const avg = avgForecast(block);
 
           return (
-            <SectionCard key={idx} title={title} subtitle="Prévisions détaillées et lecture de synthèse.">
+            <SectionCard
+              key={idx}
+              title={title}
+              subtitle="Prévisions détaillées et lecture de synthèse."
+            >
               {!meta ? (
                 <p className="text-sm text-slate-500">{empty}</p>
               ) : (
@@ -611,15 +622,15 @@ export default function ForecastPage() {
                       tone="info"
                     />
                     <MetricCard
-                      title="Total"
-                      value={euro(total)}
-                      subtitle="Somme forecastée"
+                      title="Modèle utilisé"
+                      value={block?.model_run?.model_name || "—"}
+                      subtitle={block?.model_run?.id ? `Run: ${block.model_run.id.slice(0, 8)}...` : "Aucun run"}
                       tone="default"
                     />
                     <MetricCard
-                      title="Moyenne/jour"
-                      value={euro(avg)}
-                      subtitle="Projection journalière moyenne"
+                      title="Total"
+                      value={euro(total)}
+                      subtitle="Somme forecastée"
                       tone="default"
                     />
                   </div>
@@ -629,24 +640,24 @@ export default function ForecastPage() {
                   </div>
 
                   <div className="mt-4 grid gap-2 text-sm md:grid-cols-2">
-                    {meta.model_run_id ? (
+                    {block?.model_run?.id ? (
                       <>
                         <div>Model run ID</div>
-                        <div className="break-all font-mono text-xs">{meta.model_run_id}</div>
+                        <div className="break-all font-mono text-xs">{block.model_run.id}</div>
                       </>
                     ) : null}
 
-                    {meta.site_id ? (
+                    {block?.site_id ? (
                       <>
                         <div>Site ID</div>
-                        <div className="break-all font-mono text-xs">{meta.site_id}</div>
+                        <div className="break-all font-mono text-xs">{block.site_id}</div>
                       </>
                     ) : null}
 
-                    {meta.horizon_days ? (
+                    {block?.horizon_days ? (
                       <>
                         <div>Horizon exact</div>
-                        <div>{meta.horizon_days} jours</div>
+                        <div>{block.horizon_days} jours</div>
                       </>
                     ) : null}
                   </div>
@@ -657,6 +668,9 @@ export default function ForecastPage() {
                         <tr>
                           <th className="py-2">Date</th>
                           <th className="py-2">Forecast (€)</th>
+                          <th className="py-2">Température</th>
+                          <th className="py-2">Pluie</th>
+                          <th className="py-2">Source météo</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -669,6 +683,29 @@ export default function ForecastPage() {
                                 maximumFractionDigits: 2,
                               })}{" "}
                               €
+                            </td>
+                            <td className="py-2">
+                              {p.weather?.temp_c === undefined || p.weather?.temp_c === null
+                                ? "—"
+                                : `${Number(p.weather.temp_c).toLocaleString("fr-FR", {
+                                    minimumFractionDigits: 1,
+                                    maximumFractionDigits: 1,
+                                  })} °C`}
+                            </td>
+                            <td className="py-2">
+                              {p.weather?.rain_mm === undefined || p.weather?.rain_mm === null
+                                ? "—"
+                                : `${Number(p.weather.rain_mm).toLocaleString("fr-FR", {
+                                    minimumFractionDigits: 1,
+                                    maximumFractionDigits: 1,
+                                  })} mm`}
+                            </td>
+                            <td className="py-2">
+                              {p.weather?.source === "live_forecast"
+                                ? "Prévision API"
+                                : p.weather?.source === "historical_baseline"
+                                ? "Baseline historique"
+                                : "—"}
                             </td>
                           </tr>
                         ))}
