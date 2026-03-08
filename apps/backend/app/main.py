@@ -622,10 +622,17 @@ def simulate(site_id: str, payload: SimulationIn, u=Depends(current_user), db=De
 def api_backtest(
     site_id: str = Query(...),
     horizon_days: int = Query(7),
+    model_run_id: str | None = Query(None),
     u=Depends(current_user),
     db=Depends(get_db),
 ):
     try:
-        return backtest_site(db, u.org_id, site_id, horizon_days)
+        return backtest_site(
+            db,
+            u.org_id,
+            site_id,
+            horizon_days,
+            model_run_id=model_run_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

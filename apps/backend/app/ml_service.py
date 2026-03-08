@@ -440,7 +440,13 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
         "forecast": preds,
         "sum_predicted_eur": float(sum(p["predicted_revenue_eur"] for p in preds)),
     }
-def backtest_site(db, org_id: str, site_id: str, horizon_days: int = 7):
+def backtest_site(
+    db,
+    org_id: str,
+    site_id: str,
+    horizon_days: int = 7,
+    model_run_id: str | None = None,
+):
     site, sales_rows, sales_hist, weather, traffic, staffing, events = _load_context(
         db, org_id, site_id
     )
@@ -448,11 +454,20 @@ def backtest_site(db, org_id: str, site_id: str, horizon_days: int = 7):
     if len(sales_rows) < 30:
         raise ValueError("not enough history for backtest")
 
-    run = db.execute(
-        select(ModelRun)
-        .where(ModelRun.org_id == org_id, ModelRun.site_id == site_id)
-        .order_by(ModelRun.id.desc())
-    ).scalars().first()
+    if model_run_id:
+        run = db.execute(
+            select(ModelRun).where(
+                ModelRun.id == model_run_id,
+                ModelRun.org_id == org_id,
+                ModelRun.site_id == site_id,
+            )
+        ).scalar_one_or_none()
+    else:
+        run = db.execute(
+            select(ModelRun)
+            .where(ModelRun.org_id == org_id, ModelRun.site_id == site_id)
+            .order_by(ModelRun.id.desc())
+        ).scalars().first()
 
     if not run:
         run = train_site_model(db, org_id, site_id)
@@ -499,18 +514,19 @@ def backtest_site(db, org_id: str, site_id: str, horizon_days: int = 7):
             }
         )
 
-    mae = sum(errors) / len(errors) if errors else 0
-
+    mae = sum(errors) / len(errors) if errors else 0.0
     mape = (
-        sum(abs(r["real"] - r["pred"]) / max(r["real"], 1) for r in rows) / len(rows)
+        sum(abs(r["real"] - r["pred"]) / max(r["real"], 1.0) for r in rows) / len(rows)
         if rows
-        else 0
+        else 0.0
     )
 
     return {
         "site_id": site_id,
         "horizon_days": horizon_days,
+        "model_run_id": run.id,
+        "model_name": run.model_name,
         "mae": float(mae),
         "mape": float(mape),
-        "rows": rows[-30:],  # dernier mois pour affichage
+        "rows": rows[-30:],
     }
