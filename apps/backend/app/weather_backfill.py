@@ -25,6 +25,10 @@ OPEN_METEO_COUNTRY_CODE = os.getenv("OPEN_METEO_COUNTRY_CODE", "FR").strip().upp
 WEATHER_BACKFILL_DEFAULT_YEARS = int(os.getenv("WEATHER_BACKFILL_DEFAULT_YEARS", "3"))
 HTTP_TIMEOUT_SECONDS = int(os.getenv("WEATHER_BACKFILL_TIMEOUT_SECONDS", "30"))
 
+WEATHER_FALLBACK_LAT = float(os.getenv("WEATHER_FALLBACK_LAT", "48.8566"))
+WEATHER_FALLBACK_LON = float(os.getenv("WEATHER_FALLBACK_LON", "2.3522"))
+WEATHER_FALLBACK_LABEL = os.getenv("WEATHER_FALLBACK_LABEL", "Paris fallback")
+
 
 def http_get_json(base_url: str, params: dict[str, Any]) -> dict[str, Any]:
     query = urlencode(params)
@@ -73,6 +77,29 @@ def geocode_site_address(address: str) -> tuple[float, float, str]:
         raise RuntimeError(f"Incomplete geocoding result for address: {address}")
 
     return float(latitude), float(longitude), str(name)
+
+
+def resolve_site_coordinates(site: Site) -> tuple[float, float, str]:
+    raw_address = (getattr(site, "address", None) or "").strip()
+
+    candidates = []
+    if raw_address:
+      candidates.append(raw_address)
+      if ", France" in raw_address:
+          candidates.append(raw_address.replace(", France", "").strip())
+      parts = [p.strip() for p in raw_address.split(",") if p.strip()]
+      if len(parts) >= 2:
+          candidates.append(", ".join(parts[-2:]))
+      if len(parts) >= 1:
+          candidates.append(parts[-1])
+
+    for candidate in candidates:
+        try:
+            return geocode_site_address(candidate)
+        except Exception:
+            pass
+
+    return WEATHER_FALLBACK_LAT, WEATHER_FALLBACK_LON, WEATHER_FALLBACK_LABEL
 
 
 def fetch_weather_archive(
@@ -224,7 +251,7 @@ def run_backfill(site_id: str | None, years_back: int) -> int:
 
                 start_day, end_day = target_range
 
-                latitude, longitude, resolved_name = geocode_site_address(site.address)
+                latitude, longitude, resolved_name = resolve_site_coordinates(site)
                 archive_rows = fetch_weather_archive(
                     latitude=latitude,
                     longitude=longitude,
