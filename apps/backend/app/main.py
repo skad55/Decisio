@@ -28,7 +28,7 @@ from app.models import (
     User,
     WeatherDaily,
 )
-from app.ml_service import forecast_site, train_site_model
+from app.ml_service import forecast_site, train_site_model, backtest_site
 from app.security import verify_password, create_access, decode
 
 
@@ -617,3 +617,15 @@ def simulate(site_id: str, payload: SimulationIn, u=Depends(current_user), db=De
         "delta_value": round(delta_value, 2),
         "delta_pct": round(delta_pct, 2),
     }
+
+@app.get("/api/backtest")
+def api_backtest(
+    site_id: str = Query(...),
+    horizon_days: int = Query(7),
+    u=Depends(current_user),
+    db=Depends(get_db),
+):
+    try:
+        return backtest_site(db, u.org_id, site_id, horizon_days)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

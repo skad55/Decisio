@@ -440,3 +440,77 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
         "forecast": preds,
         "sum_predicted_eur": float(sum(p["predicted_revenue_eur"] for p in preds)),
     }
+def backtest_site(db, org_id: str, site_id: str, horizon_days: int = 7):
+    site, sales_rows, sales_hist, weather, traffic, staffing, events = _load_context(
+        db, org_id, site_id
+    )
+
+    if len(sales_rows) < 30:
+        raise ValueError("not enough history for backtest")
+
+    run = db.execute(
+        select(ModelRun)
+        .where(ModelRun.org_id == org_id, ModelRun.site_id == site_id)
+        .order_by(ModelRun.id.desc())
+    ).scalars().first()
+
+    if not run:
+        run = train_site_model(db, org_id, site_id)
+
+    weights = [float(v) for v in json.loads(run.weights_json)]
+    payload = json.loads(run.features_json)
+
+    means = payload.get("means")
+    stds = payload.get("stds")
+    intercept = float(run.intercept)
+
+    errors = []
+    rows = []
+
+    for s in sales_rows[:-horizon_days]:
+        target_day = s.day + timedelta(days=horizon_days)
+
+        if target_day not in sales_hist:
+            continue
+
+        x_raw = _build_feature_vector(
+            target_day,
+            sales_hist,
+            weather,
+            traffic,
+            staffing,
+            events,
+            site.surface_m2,
+            site.category,
+        )
+
+        pred = max(0.0, _predict(intercept, weights, x_raw, means, stds))
+        real = sales_hist[target_day]
+
+        err = real - pred
+        errors.append(abs(err))
+
+        rows.append(
+            {
+                "day": target_day.isoformat(),
+                "real": float(real),
+                "pred": float(pred),
+                "error": float(err),
+            }
+        )
+
+    mae = sum(errors) / len(errors) if errors else 0
+
+    mape = (
+        sum(abs(r["real"] - r["pred"]) / max(r["real"], 1) for r in rows) / len(rows)
+        if rows
+        else 0
+    )
+
+    return {
+        "site_id": site_id,
+        "horizon_days": horizon_days,
+        "mae": float(mae),
+        "mape": float(mape),
+        "rows": rows[-30:],  # dernier mois pour affichage
+    }
