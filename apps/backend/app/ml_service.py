@@ -5,6 +5,9 @@ from datetime import date, timedelta
 from math import fabs, isfinite
 from statistics import mean
 import json
+import os
+from typing import Any
+from urllib.parse import urlencode
 
 from sqlalchemy import select
 
@@ -18,6 +21,13 @@ from app.models import (
     TrafficDaily,
     WeatherDaily,
 )
+from app.weather_backfill import geocode_site_address, http_get_json
+
+
+OPEN_METEO_FORECAST_URL = os.getenv(
+    "OPEN_METEO_FORECAST_URL",
+    "https://api.open-meteo.com/v1/forecast",
+)
 
 FEATURE_NAMES = [
     "dow",
@@ -28,6 +38,8 @@ FEATURE_NAMES = [
     "rolling7",
     "temp_c",
     "rain_mm",
+    "temp_delta_7d",
+    "rain_delta_7d",
     "traffic_index",
     "staff_count",
     "event_intensity",
@@ -53,6 +65,38 @@ def _site_flagship(category: str | None) -> float:
     return 1.0 if category.lower() in {"flagship", "premium"} else 0.0
 
 
+def _historical_weather_baseline(
+    weather: dict[date, tuple[float | None, float | None]],
+    target_day: date,
+) -> tuple[float, float]:
+    same_month_rows = [
+        row
+        for day_key, row in weather.items()
+        if day_key < target_day and day_key.month == target_day.month
+    ]
+
+    source_rows = same_month_rows
+    if not source_rows:
+        source_rows = [row for day_key, row in weather.items() if day_key < target_day]
+
+    temp_values = [float(temp) for temp, _ in source_rows if temp is not None]
+    rain_values = [float(rain) for _, rain in source_rows if rain is not None]
+
+    temp_c = mean(temp_values) if temp_values else 15.0
+    rain_mm = mean(rain_values) if rain_values else 0.0
+    return float(temp_c), float(rain_mm)
+
+
+def _resolve_weather_for_day(
+    day: date,
+    weather: dict[date, tuple[float | None, float | None]],
+) -> tuple[float, float]:
+    current = weather.get(day)
+    if current is not None:
+        return _safe(current[0], 15.0), _safe(current[1], 0.0)
+    return _historical_weather_baseline(weather, day)
+
+
 def _build_feature_vector(
     day: date,
     sales_hist: dict[date, float],
@@ -68,7 +112,8 @@ def _build_feature_vector(
     rolling_vals = [sales_hist.get(day - timedelta(days=i), l1) for i in range(1, 8)]
     rolling7 = mean(rolling_vals) if rolling_vals else l1
 
-    temp_c, rain_mm = weather.get(day, (None, None))
+    temp_c, rain_mm = _resolve_weather_for_day(day, weather)
+    temp_prev_7, rain_prev_7 = _resolve_weather_for_day(day - timedelta(days=7), weather)
 
     return [
         float(day.weekday()),
@@ -77,8 +122,10 @@ def _build_feature_vector(
         float(l1),
         float(l7),
         float(rolling7),
-        _safe(temp_c, 15.0),
-        _safe(rain_mm, 0.0),
+        float(temp_c),
+        float(rain_mm),
+        float(temp_c - temp_prev_7),
+        float(rain_mm - rain_prev_7),
         float(traffic.get(day, 100.0)),
         float(staffing.get(day, 4)),
         float(events.get(day, 0.0)),
@@ -190,6 +237,50 @@ def _load_context(db, org_id: str, site_id: str):
     return site, sales_rows, sales_hist, weather, traffic, staffing, events
 
 
+def _fetch_live_future_weather(site: Site) -> dict[date, tuple[float | None, float | None]]:
+    if not getattr(site, "address", None):
+        return {}
+
+    try:
+        latitude, longitude, _ = geocode_site_address(site.address)
+    except Exception:
+        return {}
+
+    params: dict[str, Any] = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "timezone": "UTC",
+        "forecast_days": 16,
+        "daily": "temperature_2m_mean,precipitation_sum",
+    }
+
+    try:
+        payload = http_get_json(OPEN_METEO_FORECAST_URL, params)
+    except Exception:
+        return {}
+
+    daily = payload.get("daily") or {}
+    times = daily.get("time") or []
+    temps = daily.get("temperature_2m_mean") or []
+    rains = daily.get("precipitation_sum") or []
+
+    if not (len(times) == len(temps) == len(rains)):
+        return {}
+
+    rows: dict[date, tuple[float | None, float | None]] = {}
+    for i in range(len(times)):
+        try:
+            day_value = date.fromisoformat(times[i])
+        except Exception:
+            continue
+
+        temp_value = None if temps[i] is None else float(temps[i])
+        rain_value = None if rains[i] is None else float(rains[i])
+        rows[day_value] = (temp_value, rain_value)
+
+    return rows
+
+
 def train_site_model(db, org_id: str, site_id: str) -> ModelRun:
     site, sales_rows, sales_hist, weather, traffic, staffing, events = _load_context(
         db, org_id, site_id
@@ -229,7 +320,7 @@ def train_site_model(db, org_id: str, site_id: str) -> ModelRun:
     run = ModelRun(
         org_id=org_id,
         site_id=site_id,
-        model_name="linear_gd_v1",
+        model_name="linear_gd_weather_v2",
         train_rows=len(train_rows),
         mae=mae,
         mape=mape,
@@ -274,6 +365,8 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
     intercept = float(run.intercept)
 
     anchor_day = max(s.day for s in sales_rows)
+    today_utc = date.today()
+    future_weather_live = _fetch_live_future_weather(site)
     preds = []
 
     db.query(ForecastPoint).filter(
@@ -285,6 +378,14 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
 
     for i in range(1, horizon_days + 1):
         day = anchor_day + timedelta(days=i)
+
+        if day not in weather:
+            if day in future_weather_live and day >= today_utc:
+                weather[day] = future_weather_live[day]
+            else:
+                baseline_temp, baseline_rain = _historical_weather_baseline(weather, day)
+                weather[day] = (baseline_temp, baseline_rain)
+
         x_raw = _build_feature_vector(
             day,
             sales_hist,
@@ -308,7 +409,19 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
                 predicted_revenue_eur=pred,
             )
         )
-        preds.append({"day": day.isoformat(), "predicted_revenue_eur": pred})
+        preds.append(
+            {
+                "day": day.isoformat(),
+                "predicted_revenue_eur": pred,
+                "weather": {
+                    "temp_c": float(weather[day][0]) if weather[day][0] is not None else None,
+                    "rain_mm": float(weather[day][1]) if weather[day][1] is not None else None,
+                    "source": "live_forecast"
+                    if day in future_weather_live and day >= today_utc
+                    else "historical_baseline",
+                },
+            }
+        )
 
     db.commit()
 
