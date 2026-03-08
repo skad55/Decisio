@@ -1,517 +1,403 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import RevenueChart from "../../components/RevenueChart";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import AppShell from "../../components/AppShell";
+import { apiKpis, getHealth, KpisPayload } from "../../components/api";
 import { useSession } from "../../components/useSession";
 
-type Site = {
-  id: string;
-  name: string;
-  address: string;
-  latitude?: number | null;
-  longitude?: number | null;
+type HealthPayload = {
+  ok: boolean;
+  env?: string;
 };
 
-type Driver = {
-  name: string;
-  impact: number;
-};
+function euro(value: number) {
+  return new Intl.NumberFormat("fr-FR", {
+    style: "currency",
+    currency: "EUR",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
 
-type DashboardPayload = {
-  historical: Array<{ day: string; revenue: number }>;
-  forecast: Array<{ day: string; prediction: number; lower?: number; upper?: number }>;
-  confidence?: "high" | "medium" | "low";
-  drivers?: Driver[];
-  insights?: string[];
-};
+function percent(value: number) {
+  return `${(value * 100).toFixed(2)} %`;
+}
 
-type StaffingRecommendation = {
-  current_staff: number;
-  recommended_staff: number;
-  staff_gap: number;
-  message: string;
-};
+function signedPercent(value: number | null) {
+  if (value === null || Number.isNaN(value)) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)} %`;
+}
 
-type SimulationResult = {
-  base_forecast: number;
-  simulated_revenue: number;
-  delta_value: number;
-  delta_pct: number;
-};
+function signedEuro(value: number) {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${euro(value)}`;
+}
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+function cn(...parts: Array<string | false | null | undefined>) {
+  return parts.filter(Boolean).join(" ");
+}
+
+function SectionCard({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-2xl border bg-white p-5 shadow-sm">
+      <div className="mb-4">
+        <h2 className="text-base font-semibold text-slate-900">{title}</h2>
+        {subtitle ? <p className="mt-1 text-sm text-slate-600">{subtitle}</p> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function StatusPill({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "green" | "amber" | "red" | "slate";
+}) {
+  const toneClass =
+    tone === "green"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : tone === "amber"
+      ? "border-amber-200 bg-amber-50 text-amber-700"
+      : tone === "red"
+      ? "border-rose-200 bg-rose-50 text-rose-700"
+      : "border-slate-200 bg-slate-50 text-slate-700";
+
+  return (
+    <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium", toneClass)}>
+      {label}
+    </span>
+  );
+}
+
+function MetricCard({
+  title,
+  value,
+  tone = "default",
+  subtitle,
+}: {
+  title: string;
+  value: string;
+  tone?: "default" | "good" | "warn" | "bad";
+  subtitle?: string;
+}) {
+  const toneClass =
+    tone === "good"
+      ? "border-emerald-200 bg-emerald-50"
+      : tone === "warn"
+      ? "border-amber-200 bg-amber-50"
+      : tone === "bad"
+      ? "border-rose-200 bg-rose-50"
+      : "border-slate-200 bg-white";
+
+  return (
+    <div className={cn("rounded-2xl border p-4 shadow-sm", toneClass)}>
+      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{title}</div>
+      <div className="mt-2 text-2xl font-semibold text-slate-900">{value}</div>
+      {subtitle ? <div className="mt-2 text-sm text-slate-600">{subtitle}</div> : null}
+    </div>
+  );
+}
+
+function InsightRow({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: React.ReactNode;
+  detail: string;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <div className="text-sm font-medium text-slate-900">{label}</div>
+          <div className="mt-1 text-sm text-slate-600">{detail}</div>
+        </div>
+        <div className="shrink-0">{value}</div>
+      </div>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
-  const { token, ready, isAuthenticated } = useSession();
+  const { token, ready } = useSession();
+  const [health, setHealth] = useState<HealthPayload | null>(null);
+  const [kpis, setKpis] = useState<KpisPayload | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  const [sites, setSites] = useState<Site[]>([]);
-  const [siteId, setSiteId] = useState<string>("");
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
 
-  const [data, setData] = useState<DashboardPayload | null>(null);
-  const [staffing, setStaffing] = useState<StaffingRecommendation | null>(null);
+    try {
+      const healthData = await getHealth();
+      setHealth(healthData);
 
-  const [error, setError] = useState<string>("");
-  const [debug, setDebug] = useState<string>("");
-
-  const [weatherMessage, setWeatherMessage] = useState<string>("");
-  const [weatherBusy, setWeatherBusy] = useState(false);
-
-  const [simTrafficDeltaPct, setSimTrafficDeltaPct] = useState<number>(0);
-  const [simStaffDelta, setSimStaffDelta] = useState<number>(0);
-  const [simEventIntensityDelta, setSimEventIntensityDelta] = useState<number>(0);
-  const [simRainDeltaMm, setSimRainDeltaMm] = useState<number>(0);
-  const [simBusy, setSimBusy] = useState(false);
-  const [simResult, setSimResult] = useState<SimulationResult | null>(null);
-  const [simError, setSimError] = useState<string>("");
+      if (token) {
+        const kpisData = await apiKpis(token);
+        setKpis(kpisData);
+      } else {
+        setKpis(null);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Erreur inattendue");
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
 
   useEffect(() => {
     if (!ready) return;
+    load();
+  }, [ready, load]);
 
-    if (!token) {
-      setError("Aucun token trouvé. Connecte-toi d’abord dans l’application.");
-      setDebug(`API_BASE=${API_BASE} | token=missing | ready=${ready}`);
-      return;
+  const computed = useMemo(() => {
+    const actual = Number(kpis?.kpis.ca_real_eur ?? 0);
+    const predicted = Number(kpis?.kpis.ca_pred_eur ?? 0);
+    const mape = Number(kpis?.kpis.mape ?? 0);
+    const mae = Number(kpis?.kpis.mae ?? 0);
+
+    const delta = predicted - actual;
+    const deltaPct = actual !== 0 ? (delta / actual) * 100 : null;
+
+    let precisionTone: "good" | "warn" | "bad" = "warn";
+    let precisionText = "Précision moyenne";
+    if (mape <= 0.1) {
+      precisionTone = "good";
+      precisionText = "Précision solide";
+    } else if (mape <= 0.2) {
+      precisionTone = "warn";
+      precisionText = "Précision acceptable";
+    } else {
+      precisionTone = "bad";
+      precisionText = "Précision insuffisante";
     }
 
-    async function loadSites() {
-      try {
-        setError("");
-        setDebug(`GET ${API_BASE}/api/sites`);
-
-        const response = await fetch(`${API_BASE}/api/sites`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        const text = await response.text();
-
-        if (!response.ok) {
-          throw new Error(`GET /api/sites -> ${response.status} ${text}`);
-        }
-
-        const json = JSON.parse(text) as Site[];
-        setSites(json);
-
-        if (json.length > 0) {
-          setSiteId(json[0].id);
-        } else {
-          setError("Aucun site trouvé.");
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : "Erreur inconnue";
-        setError(`Erreur chargement des sites : ${msg}`);
-        setDebug(`API_BASE=${API_BASE} | token=present`);
-      }
+    let biasTone: "good" | "warn" | "bad" = "good";
+    let biasText = "Prévision équilibrée";
+    if (delta > 0) {
+      biasTone = Math.abs(deltaPct ?? 0) > 10 ? "warn" : "good";
+      biasText = "Sur-prédiction";
+    } else if (delta < 0) {
+      biasTone = Math.abs(deltaPct ?? 0) > 10 ? "warn" : "good";
+      biasText = "Sous-prédiction";
     }
 
-    loadSites();
-  }, [ready, token]);
+    return {
+      actual,
+      predicted,
+      mape,
+      mae,
+      delta,
+      deltaPct,
+      precisionTone,
+      precisionText,
+      biasTone,
+      biasText,
+    };
+  }, [kpis]);
 
-  useEffect(() => {
-    if (!ready || !token || !siteId) return;
+  const apiTone: "green" | "amber" | "red" =
+    health?.ok === true ? "green" : health ? "red" : "amber";
 
-    async function loadDashboard() {
-      try {
-        setError("");
-        setDebug(`GET ${API_BASE}/api/sites/${siteId}/dashboard`);
-
-        const response = await fetch(`${API_BASE}/api/sites/${siteId}/dashboard`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        const text = await response.text();
-
-        if (!response.ok) {
-          throw new Error(`GET /api/sites/${siteId}/dashboard -> ${response.status} ${text}`);
-        }
-
-        const json = JSON.parse(text) as DashboardPayload;
-        setData(json);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : "Erreur inconnue";
-        setError(`Erreur chargement dashboard : ${msg}`);
-        setDebug(`API_BASE=${API_BASE} | siteId=${siteId} | token=present`);
-      }
-    }
-
-    async function loadStaffingRecommendation() {
-      try {
-        const response = await fetch(
-          `${API_BASE}/api/sites/${siteId}/staffing-recommendation`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          }
-        );
-
-        const text = await response.text();
-
-        if (!response.ok) {
-          setStaffing(null);
-          return;
-        }
-
-        const json = JSON.parse(text) as StaffingRecommendation;
-        setStaffing(json);
-      } catch {
-        setStaffing(null);
-      }
-    }
-
-    loadDashboard();
-    loadStaffingRecommendation();
-  }, [ready, token, siteId]);
-
-  const historical = useMemo(
-    () =>
-      (data?.historical || []).map((p) => ({
-        day: p.day,
-        value: Number(p.revenue),
-      })),
-    [data]
-  );
-
-  const forecast = useMemo(
-    () =>
-      (data?.forecast || []).map((p) => ({
-        day: p.day,
-        value: Number(p.prediction),
-        lower: p.lower !== undefined ? Number(p.lower) : undefined,
-        upper: p.upper !== undefined ? Number(p.upper) : undefined,
-      })),
-    [data]
-  );
-
-  async function onFetchWeatherData() {
-    if (!token || !siteId) return;
-
-    try {
-      setWeatherBusy(true);
-      setWeatherMessage("");
-
-      const response = await fetch(`${API_BASE}/api/sites/${siteId}/ingest/weather`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      const text = await response.text();
-
-      if (!response.ok) {
-        throw new Error(text || `HTTP ${response.status}`);
-      }
-
-      const json = JSON.parse(text);
-      setWeatherMessage(`Weather data updated (${json.rows_inserted} rows inserted)`);
-
-      const dashboardResponse = await fetch(`${API_BASE}/api/sites/${siteId}/dashboard`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (dashboardResponse.ok) {
-        const dashboardJson = await dashboardResponse.json();
-        setData(dashboardJson);
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Erreur inconnue";
-      setWeatherMessage(`Erreur météo : ${msg}`);
-    } finally {
-      setWeatherBusy(false);
-    }
-  }
-
-  async function onRunSimulation() {
-    if (!token || !siteId) return;
-
-    try {
-      setSimBusy(true);
-      setSimError("");
-      setSimResult(null);
-
-      const response = await fetch(`${API_BASE}/api/sites/${siteId}/simulate`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          traffic_delta_pct: Number(simTrafficDeltaPct),
-          staff_delta: Number(simStaffDelta),
-          event_intensity_delta: Number(simEventIntensityDelta),
-          rain_delta_mm: Number(simRainDeltaMm),
-        }),
-      });
-
-      const text = await response.text();
-
-      if (!response.ok) {
-        throw new Error(text || `HTTP ${response.status}`);
-      }
-
-      const json = JSON.parse(text) as SimulationResult;
-      setSimResult(json);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Erreur inconnue";
-      setSimError(msg);
-    } finally {
-      setSimBusy(false);
-    }
-  }
+  const sessionTone: "green" | "amber" = token ? "green" : "amber";
 
   return (
-    <main className="p-6 space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Revenue Dashboard</h1>
-        <p className="text-sm text-gray-500">Historical revenue vs forecast</p>
-      </div>
+    <AppShell>
+      <div className="space-y-6">
+        <section className="rounded-2xl border bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold text-slate-900">Dashboard</h1>
+              <p className="mt-1 text-sm text-slate-600">
+                Vue de démonstration du produit : état technique, KPI forecast et lecture métier.
+              </p>
+            </div>
 
-      {!ready && (
-        <div className="rounded-lg border border-gray-300 bg-gray-50 p-4 text-sm">
-          Initialisation session...
-        </div>
-      )}
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusPill
+                label={health ? (health.ok ? "API disponible" : "API indisponible") : "API en attente"}
+                tone={apiTone}
+              />
+              <StatusPill
+                label={token ? "Session active" : "Non connecté"}
+                tone={sessionTone}
+              />
+              {health?.env ? <StatusPill label={`ENV ${health.env}`} tone="slate" /> : null}
+            </div>
+          </div>
 
-      {ready && !isAuthenticated && (
-        <div className="rounded-lg border border-yellow-300 bg-yellow-50 p-4 text-sm text-yellow-800">
-          Aucun token détecté. Connecte-toi d’abord dans l’application.
-        </div>
-      )}
-
-      {sites.length > 0 && (
-        <div className="max-w-sm">
-          <label className="mb-2 block text-sm font-medium">Site</label>
-          <select
-            className="w-full rounded-lg border border-gray-300 p-2"
-            value={siteId}
-            onChange={(e) => setSiteId(e.target.value)}
-          >
-            {sites.map((site) => (
-              <option key={site.id} value={site.id}>
-                {site.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      {error && (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-700 whitespace-pre-wrap">
-          {error}
-        </div>
-      )}
-
-      {debug && (
-        <div className="rounded-lg border border-gray-300 bg-gray-50 p-4 text-xs text-gray-700 whitespace-pre-wrap">
-          {debug}
-        </div>
-      )}
-
-      {!error && data && (
-        <>
-          <div className="flex items-center gap-3">
-            <span className="rounded-full border px-3 py-1 text-sm">
-              Confidence: {(data.confidence || "low").toUpperCase()}
-            </span>
-
+          <div className="mt-4 flex flex-wrap gap-3">
             <button
+              className="rounded-xl border bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-60"
+              onClick={load}
+              disabled={loading}
               type="button"
-              onClick={onFetchWeatherData}
-              disabled={weatherBusy || !siteId}
-              className="rounded-lg border bg-white px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50"
             >
-              {weatherBusy ? "Fetching..." : "Fetch Weather Data"}
+              {loading ? "Chargement..." : "Rafraîchir"}
             </button>
-          </div>
 
-          {weatherMessage && (
-            <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-              {weatherMessage}
-            </div>
-          )}
-
-          <RevenueChart historical={historical} forecast={forecast} />
-
-          {data.insights && data.insights.length > 0 && (
-            <div className="rounded-2xl border bg-white p-5 shadow-sm">
-              <h2 className="text-lg font-semibold">AI Insights</h2>
-              <div className="mt-3 space-y-2">
-                {data.insights.map((insight, idx) => (
-                  <div
-                    key={idx}
-                    className="rounded-lg border bg-slate-50 px-3 py-2 text-sm text-slate-700"
-                  >
-                    {insight}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {data.drivers && data.drivers.length > 0 && (
-            <div className="rounded-2xl border bg-white p-5 shadow-sm">
-              <h2 className="text-lg font-semibold">Revenue Drivers</h2>
-              <div className="mt-3 space-y-2">
-                {data.drivers.map((driver, idx) => {
-                  const positive = Number(driver.impact) >= 0;
-                  return (
-                    <div
-                      key={`${driver.name}-${idx}`}
-                      className="flex items-center justify-between rounded-lg border bg-slate-50 px-3 py-2 text-sm"
-                    >
-                      <span className="capitalize">{driver.name}</span>
-                      <span className={positive ? "text-green-700" : "text-red-700"}>
-                        {(Number(driver.impact) * 100).toFixed(1)}%
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {staffing && (
-            <div className="rounded-2xl border bg-white p-5 shadow-sm">
-              <h2 className="text-lg font-semibold">Staffing Recommendation</h2>
-              <div className="mt-3 grid gap-2 text-sm md:grid-cols-2">
-                <div>Current staff</div>
-                <div>{staffing.current_staff}</div>
-
-                <div>Recommended staff</div>
-                <div>{staffing.recommended_staff}</div>
-
-                <div>Staff gap</div>
-                <div
-                  className={
-                    staffing.staff_gap > 0
-                      ? "text-amber-700 font-medium"
-                      : "text-green-700 font-medium"
-                  }
-                >
-                  {staffing.staff_gap > 0 ? `+${staffing.staff_gap}` : staffing.staff_gap}
-                </div>
-
-                <div>Message</div>
-                <div
-                  className={
-                    staffing.staff_gap > 0
-                      ? "text-amber-700"
-                      : "text-green-700"
-                  }
-                >
-                  {staffing.message}
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="rounded-2xl border bg-white p-5 shadow-sm">
-            <h2 className="text-lg font-semibold">Scenario Simulator</h2>
-
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <div>
-                <label className="mb-2 block text-sm font-medium">Traffic delta %</label>
-                <input
-                  type="number"
-                  className="w-full rounded-lg border border-gray-300 p-2"
-                  value={simTrafficDeltaPct}
-                  onChange={(e) => setSimTrafficDeltaPct(Number(e.target.value))}
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium">Staff delta</label>
-                <input
-                  type="number"
-                  className="w-full rounded-lg border border-gray-300 p-2"
-                  value={simStaffDelta}
-                  onChange={(e) => setSimStaffDelta(Number(e.target.value))}
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium">Event intensity delta</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  className="w-full rounded-lg border border-gray-300 p-2"
-                  value={simEventIntensityDelta}
-                  onChange={(e) => setSimEventIntensityDelta(Number(e.target.value))}
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium">Rain delta mm</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  className="w-full rounded-lg border border-gray-300 p-2"
-                  value={simRainDeltaMm}
-                  onChange={(e) => setSimRainDeltaMm(Number(e.target.value))}
-                />
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <button
-                type="button"
-                onClick={onRunSimulation}
-                disabled={simBusy || !siteId}
-                className="rounded-lg border bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-50"
+            {!token ? (
+              <a
+                href="/login"
+                className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
               >
-                {simBusy ? "Running..." : "Run Simulation"}
-              </button>
+                Aller au login
+              </a>
+            ) : null}
+          </div>
+
+          {error ? (
+            <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">
+              {error}
+            </div>
+          ) : null}
+        </section>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
+          <MetricCard
+            title="API health"
+            value={health ? (health.ok ? "OK" : "KO") : "—"}
+            tone={health?.ok ? "good" : health ? "bad" : "warn"}
+            subtitle={health?.env ? `Environnement: ${health.env}` : "État de l’API"}
+          />
+
+          <MetricCard
+            title="CA réel"
+            value={euro(computed.actual)}
+            subtitle="Valeur issue des KPI agrégés"
+          />
+
+          <MetricCard
+            title="CA prédit"
+            value={euro(computed.predicted)}
+            subtitle="Prévision agrégée"
+          />
+
+          <MetricCard
+            title="Écart forecast"
+            value={signedEuro(computed.delta)}
+            tone={Math.abs(computed.deltaPct ?? 0) > 10 ? "warn" : "good"}
+            subtitle={computed.deltaPct === null ? "Base réelle nulle" : signedPercent(computed.deltaPct)}
+          />
+
+          <MetricCard
+            title="MAPE"
+            value={percent(computed.mape)}
+            tone={computed.precisionTone}
+            subtitle={computed.precisionText}
+          />
+
+          <MetricCard
+            title="MAE"
+            value={euro(computed.mae)}
+            tone={computed.mae > 0 ? "default" : "warn"}
+            subtitle="Erreur absolue moyenne"
+          />
+        </div>
+
+        <SectionCard
+          title="Lecture métier"
+          subtitle="Interprétation immédiate des KPI pour une démonstration client ou investisseur."
+        >
+          <div className="grid grid-cols-1 gap-3">
+            <InsightRow
+              label="État technique"
+              value={
+                <StatusPill
+                  label={health?.ok ? "Prêt pour démo" : "Vérification requise"}
+                  tone={health?.ok ? "green" : "red"}
+                />
+              }
+              detail="Le produit doit au minimum exposer une API saine et une session exploitable pour être démontrable."
+            />
+
+            <InsightRow
+              label="Connexion utilisateur"
+              value={
+                <StatusPill
+                  label={token ? "Authentifié" : "À connecter"}
+                  tone={token ? "green" : "amber"}
+                />
+              }
+              detail="Sans session active, le dashboard ne charge pas les KPI métier sécurisés."
+            />
+
+            <InsightRow
+              label="Niveau de précision"
+              value={<StatusPill label={computed.precisionText} tone={computed.precisionTone === "good" ? "green" : computed.precisionTone === "warn" ? "amber" : "red"} />}
+              detail={`MAPE observé: ${percent(computed.mape)}. En dessous de 10 %, la lecture devient crédible pour une démo business.`}
+            />
+
+            <InsightRow
+              label="Biais de prévision"
+              value={<StatusPill label={computed.biasText} tone={computed.biasTone === "good" ? "green" : computed.biasTone === "warn" ? "amber" : "red"} />}
+              detail={
+                computed.deltaPct === null
+                  ? "Impossible de calculer un pourcentage d’écart car la base réelle vaut 0."
+                  : `Écart relatif observé: ${signedPercent(computed.deltaPct)} entre le réalisé et le prédit.`
+              }
+            />
+
+            <InsightRow
+              label="Verdict démonstration"
+              value={
+                <StatusPill
+                  label={
+                    health?.ok && token
+                      ? "Démo exploitable"
+                      : health?.ok
+                      ? "Technique OK, login requis"
+                      : "Blocage technique"
+                  }
+                  tone={health?.ok && token ? "green" : health?.ok ? "amber" : "red"}
+                />
+              }
+              detail="Ce verdict est volontairement simple : il sert à lire le produit en 5 secondes."
+            />
+          </div>
+        </SectionCard>
+
+        <SectionCard
+          title="Checks rapides"
+          subtitle="Contrôles manuels immédiats après relance."
+        >
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-sm font-medium text-slate-900">Ce que tu dois voir</div>
+              <ul className="mt-2 space-y-2 text-sm text-slate-600">
+                <li>Un header lisible avec statuts API et session.</li>
+                <li>6 cartes KPI avec écart forecast explicite.</li>
+                <li>Une section “Lecture métier” intelligible sans explication orale.</li>
+                <li>Un bouton de rafraîchissement fonctionnel.</li>
+              </ul>
             </div>
 
-            {simError && (
-              <div className="mt-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap">
-                {simError}
-              </div>
-            )}
-
-            {simResult && (
-              <div className="mt-4 rounded-xl border bg-slate-50 p-4">
-                <div className="grid gap-2 text-sm md:grid-cols-2">
-                  <div>Base forecast</div>
-                  <div>
-                    {Number(simResult.base_forecast).toLocaleString("fr-FR", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })} €
-                  </div>
-
-                  <div>Simulated revenue</div>
-                  <div>
-                    {Number(simResult.simulated_revenue).toLocaleString("fr-FR", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })} €
-                  </div>
-
-                  <div>Delta €</div>
-                  <div className={simResult.delta_value >= 0 ? "text-green-700" : "text-red-700"}>
-                    {Number(simResult.delta_value).toLocaleString("fr-FR", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })} €
-                  </div>
-
-                  <div>Delta %</div>
-                  <div className={simResult.delta_pct >= 0 ? "text-green-700" : "text-red-700"}>
-                    {Number(simResult.delta_pct).toFixed(2)} %
-                  </div>
-                </div>
-              </div>
-            )}
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-sm font-medium text-slate-900">Ce que ce lot ne change pas</div>
+              <ul className="mt-2 space-y-2 text-sm text-slate-600">
+                <li>Aucune logique ML.</li>
+                <li>Aucune route backend.</li>
+                <li>Aucun schéma SQL.</li>
+                <li>Aucune dépendance npm supplémentaire.</li>
+              </ul>
+            </div>
           </div>
-        </>
-      )}
-    </main>
+        </SectionCard>
+      </div>
+    </AppShell>
   );
 }
