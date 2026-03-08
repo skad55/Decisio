@@ -51,7 +51,12 @@ function StatusPill({
       : "border-slate-200 bg-slate-50 text-slate-700";
 
   return (
-    <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium", toneClass)}>
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium",
+        toneClass
+      )}
+    >
       {label}
     </span>
   );
@@ -81,7 +86,9 @@ function MetricCard({
 
   return (
     <div className={cn("rounded-2xl border p-4 shadow-sm", toneClass)}>
-      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{title}</div>
+      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
+        {title}
+      </div>
       <div className="mt-2 text-2xl font-semibold text-slate-900">{value}</div>
       {subtitle ? <div className="mt-2 text-sm text-slate-600">{subtitle}</div> : null}
     </div>
@@ -137,6 +144,42 @@ function avgForecast(block: ForecastPayload | null) {
   const meta = getForecastMeta(block);
   if (!meta?.forecast?.length) return 0;
   return sumForecast(block) / meta.forecast.length;
+}
+
+function classifyInsight(insight: string) {
+  const normalized = insight.toLowerCase();
+
+  if (
+    normalized.includes("risque") ||
+    normalized.includes("baisse") ||
+    normalized.includes("attention") ||
+    normalized.includes("tension") ||
+    normalized.includes("sous") ||
+    normalized.includes("retard")
+  ) {
+    return {
+      toneClass: "border-rose-200 bg-rose-50",
+      badgeLabel: "Point de vigilance",
+    };
+  }
+
+  if (
+    normalized.includes("opportunité") ||
+    normalized.includes("hausse") ||
+    normalized.includes("croissance") ||
+    normalized.includes("potentiel") ||
+    normalized.includes("levier")
+  ) {
+    return {
+      toneClass: "border-emerald-200 bg-emerald-50",
+      badgeLabel: "Point favorable",
+    };
+  }
+
+  return {
+    toneClass: "border-slate-200 bg-white",
+    badgeLabel: "Point d’analyse",
+  };
 }
 
 export default function ForecastPage() {
@@ -307,7 +350,16 @@ export default function ForecastPage() {
       forecast7Avg: avgForecast(forecast7),
       forecast30Avg: avgForecast(forecast30),
     };
-  }, [trainResult, forecast7Meta, forecast30Meta, err, training, forecasting, forecast7, forecast30]);
+  }, [
+    trainResult,
+    forecast7Meta,
+    forecast30Meta,
+    err,
+    training,
+    forecasting,
+    forecast7,
+    forecast30,
+  ]);
 
   return (
     <AppShell>
@@ -317,7 +369,8 @@ export default function ForecastPage() {
             <div>
               <h1 className="text-2xl font-semibold text-slate-900">Forecast IA</h1>
               <p className="mt-1 text-sm text-slate-600">
-                Entraîne le modèle sur le site sélectionné puis génère les prévisions J+7 et J+30.
+                Entraîne le modèle sur le site sélectionné puis génère les prévisions J+7
+                et J+30.
               </p>
             </div>
 
@@ -327,11 +380,23 @@ export default function ForecastPage() {
                 tone={selectedSite ? "green" : "amber"}
               />
               <StatusPill
-                label={training ? "Training en cours" : summary.hasTrain ? "Dernier training OK" : "Training non lancé"}
+                label={
+                  training
+                    ? "Training en cours"
+                    : summary.hasTrain
+                    ? "Dernier training OK"
+                    : "Training non lancé"
+                }
                 tone={training ? "blue" : summary.hasTrain ? "green" : "amber"}
               />
               <StatusPill
-                label={forecasting ? "Forecast en cours" : summary.hasF7 || summary.hasF30 ? "Forecast disponible" : "Forecast non lancé"}
+                label={
+                  forecasting
+                    ? "Forecast en cours"
+                    : summary.hasF7 || summary.hasF30
+                    ? "Forecast disponible"
+                    : "Forecast non lancé"
+                }
                 tone={forecasting ? "blue" : summary.hasF7 || summary.hasF30 ? "green" : "amber"}
               />
               <StatusPill label={summary.verdict} tone={summary.verdictTone} />
@@ -358,7 +423,8 @@ export default function ForecastPage() {
               <div className="text-sm font-medium text-slate-900">Lecture immédiate</div>
               <div className="mt-2 text-sm text-slate-600">
                 Cette page permet de démontrer en quelques clics la chaîne complète :
-                sélection du site, entraînement du modèle, puis prévisions opérationnelles à 7 et 30 jours.
+                sélection du site, entraînement du modèle, puis prévisions opérationnelles à
+                7 et 30 jours.
               </div>
             </div>
           </div>
@@ -393,7 +459,7 @@ export default function ForecastPage() {
           </div>
 
           {err ? (
-            <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900 whitespace-pre-wrap">
+            <div className="mt-4 whitespace-pre-wrap rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
               {err}
             </div>
           ) : null}
@@ -409,31 +475,49 @@ export default function ForecastPage() {
           <MetricCard
             title="Training"
             value={summary.hasTrain ? "OK" : training ? "..." : "—"}
-            subtitle={summary.hasTrain ? "Dernier entraînement disponible" : "Aucun résultat d’entraînement"}
+            subtitle={
+              summary.hasTrain
+                ? "Dernier entraînement disponible"
+                : "Aucun résultat d’entraînement"
+            }
             tone={summary.hasTrain ? "good" : training ? "info" : "warn"}
           />
           <MetricCard
             title="Forecast J+7"
             value={summary.hasF7 ? "OK" : forecasting ? "..." : "—"}
-            subtitle={summary.hasF7 ? `${forecast7Meta?.forecast?.length || 0} lignes générées` : "Aucune prévision J+7"}
+            subtitle={
+              summary.hasF7
+                ? `${forecast7Meta?.forecast?.length || 0} lignes générées`
+                : "Aucune prévision J+7"
+            }
             tone={summary.hasF7 ? "good" : forecasting ? "info" : "warn"}
           />
           <MetricCard
             title="Forecast J+30"
             value={summary.hasF30 ? "OK" : forecasting ? "..." : "—"}
-            subtitle={summary.hasF30 ? `${forecast30Meta?.forecast?.length || 0} lignes générées` : "Aucune prévision J+30"}
+            subtitle={
+              summary.hasF30
+                ? `${forecast30Meta?.forecast?.length || 0} lignes générées`
+                : "Aucune prévision J+30"
+            }
             tone={summary.hasF30 ? "good" : forecasting ? "info" : "warn"}
           />
           <MetricCard
             title="Total J+7"
             value={summary.hasF7 ? euro(summary.forecast7Total) : "—"}
-            subtitle={summary.hasF7 ? `Moyenne/jour: ${euro(summary.forecast7Avg)}` : "Pas encore calculé"}
+            subtitle={
+              summary.hasF7 ? `Moyenne/jour: ${euro(summary.forecast7Avg)}` : "Pas encore calculé"
+            }
             tone={summary.hasF7 ? "info" : "default"}
           />
           <MetricCard
             title="Total J+30"
             value={summary.hasF30 ? euro(summary.forecast30Total) : "—"}
-            subtitle={summary.hasF30 ? `Moyenne/jour: ${euro(summary.forecast30Avg)}` : "Pas encore calculé"}
+            subtitle={
+              summary.hasF30
+                ? `Moyenne/jour: ${euro(summary.forecast30Avg)}`
+                : "Pas encore calculé"
+            }
             tone={summary.hasF30 ? "info" : "default"}
           />
         </div>
@@ -484,27 +568,31 @@ export default function ForecastPage() {
 
             <div className="mt-4 grid gap-2 text-sm md:grid-cols-2">
               <div>Model run ID</div>
-              <div className="font-mono text-xs break-all">{trainResult.model_run_id}</div>
+              <div className="break-all font-mono text-xs">{trainResult.model_run_id}</div>
               <div>Site ID</div>
-              <div className="font-mono text-xs break-all">{trainResult.site_id}</div>
+              <div className="break-all font-mono text-xs">{trainResult.site_id}</div>
             </div>
           </SectionCard>
         ) : null}
 
         {([
-          { block: forecast7, title: "Forecast J+7", empty: "Aucun forecast J+7 généré pour le moment." },
-          { block: forecast30, title: "Forecast J+30", empty: "Aucun forecast J+30 généré pour le moment." },
+          {
+            block: forecast7,
+            title: "Forecast J+7",
+            empty: "Aucun forecast J+7 généré pour le moment.",
+          },
+          {
+            block: forecast30,
+            title: "Forecast J+30",
+            empty: "Aucun forecast J+30 généré pour le moment.",
+          },
         ] as const).map(({ block, title, empty }, idx) => {
           const meta = getForecastMeta(block);
           const total = sumForecast(block);
           const avg = avgForecast(block);
 
           return (
-            <SectionCard
-              key={idx}
-              title={title}
-              subtitle="Prévisions détaillées et lecture de synthèse."
-            >
+            <SectionCard key={idx} title={title} subtitle="Prévisions détaillées et lecture de synthèse.">
               {!meta ? (
                 <p className="text-sm text-slate-500">{empty}</p>
               ) : (
@@ -537,24 +625,21 @@ export default function ForecastPage() {
                   </div>
 
                   <div className="mt-4">
-                    <ForecastChart
-                      title={`${title} — évolution prévisionnelle`}
-                      points={meta.forecast}
-                    />
+                    <ForecastChart title={`${title} — évolution prévisionnelle`} points={meta.forecast} />
                   </div>
 
                   <div className="mt-4 grid gap-2 text-sm md:grid-cols-2">
                     {meta.model_run_id ? (
                       <>
                         <div>Model run ID</div>
-                        <div className="font-mono text-xs break-all">{meta.model_run_id}</div>
+                        <div className="break-all font-mono text-xs">{meta.model_run_id}</div>
                       </>
                     ) : null}
 
                     {meta.site_id ? (
                       <>
                         <div>Site ID</div>
-                        <div className="font-mono text-xs break-all">{meta.site_id}</div>
+                        <div className="break-all font-mono text-xs">{meta.site_id}</div>
                       </>
                     ) : null}
 
@@ -593,16 +678,33 @@ export default function ForecastPage() {
 
                   {meta.insights && Array.isArray(meta.insights) && meta.insights.length > 0 ? (
                     <div className="mt-4 rounded-xl border bg-slate-50 p-4">
-                      <div className="text-sm font-semibold">AI Insights</div>
-                      <div className="mt-3 space-y-2">
-                        {meta.insights.map((insight: string, i: number) => (
-                          <div
-                            key={i}
-                            className="rounded-lg border bg-white px-3 py-2 text-sm text-slate-700"
-                          >
-                            {insight}
-                          </div>
-                        ))}
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-semibold text-slate-900">
+                          Insights opérationnels
+                        </div>
+                        <div className="text-xs text-slate-500">
+                          {meta.insights.length} insight{meta.insights.length > 1 ? "s" : ""}
+                        </div>
+                      </div>
+
+                      <div className="mt-3 grid gap-3">
+                        {meta.insights.map((insight: string, i: number) => {
+                          const classification = classifyInsight(insight);
+
+                          return (
+                            <div
+                              key={i}
+                              className={`rounded-xl border px-4 py-3 ${classification.toneClass}`}
+                            >
+                              <div className="mb-2">
+                                <span className="inline-flex rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700">
+                                  {classification.badgeLabel}
+                                </span>
+                              </div>
+                              <div className="text-sm leading-6 text-slate-800">{insight}</div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   ) : (
