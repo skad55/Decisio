@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, timedelta
-from math import fabs, isfinite
-from statistics import mean
 import json
 import os
+import time
+from dataclasses import dataclass
+from datetime import date, timedelta
+from math import expm1, fabs, isfinite, log1p
+from statistics import mean
 from typing import Any
-from urllib.parse import urlencode
 
 from sqlalchemy import select
 
@@ -29,13 +29,20 @@ OPEN_METEO_FORECAST_URL = os.getenv(
     "https://api.open-meteo.com/v1/forecast",
 )
 
+TARGET_TRANSFORM = "log1p"
+MIN_TRAIN_HISTORY_DAYS = 28
+MIN_LAG_HISTORY_DAYS = 14
+BACKTEST_MAX_WINDOWS = 20
+
 FEATURE_NAMES = [
     "dow",
     "month",
     "is_weekend",
     "lag_1",
     "lag_7",
+    "lag_14",
     "rolling7",
+    "rolling14",
     "temp_c",
     "rain_mm",
     "temp_delta_7d",
@@ -65,6 +72,17 @@ def _site_flagship(category: str | None) -> float:
     return 1.0 if category.lower() in {"flagship", "premium"} else 0.0
 
 
+def _target_encode(y: float) -> float:
+    return float(log1p(max(0.0, y)))
+
+def _target_decode(y_transformed: float) -> float:
+    if not isfinite(y_transformed):
+        return 0.0
+
+    capped = min(float(y_transformed), 12.0)
+    return float(max(0.0, expm1(capped)))
+
+
 def _historical_weather_baseline(
     weather: dict[date, tuple[float | None, float | None]],
     target_day: date,
@@ -74,7 +92,6 @@ def _historical_weather_baseline(
         for day_key, row in weather.items()
         if day_key < target_day and day_key.month == target_day.month
     ]
-
     source_rows = same_month_rows
     if not source_rows:
         source_rows = [row for day_key, row in weather.items() if day_key < target_day]
@@ -97,6 +114,30 @@ def _resolve_weather_for_day(
     return _historical_weather_baseline(weather, day)
 
 
+def _history_value(
+    sales_hist: dict[date, float],
+    day: date,
+    fallback: float,
+) -> float:
+    value = sales_hist.get(day)
+    if value is None:
+        return float(fallback)
+    return float(value)
+
+
+def _rolling_mean(
+    sales_hist: dict[date, float],
+    day: date,
+    window: int,
+    fallback: float,
+) -> float:
+    values = [
+        _history_value(sales_hist, day - timedelta(days=i), fallback)
+        for i in range(1, window + 1)
+    ]
+    return float(mean(values)) if values else float(fallback)
+
+
 def _build_feature_vector(
     day: date,
     sales_hist: dict[date, float],
@@ -107,10 +148,18 @@ def _build_feature_vector(
     surface_m2: int | None,
     category: str | None,
 ) -> list[float]:
-    l1 = sales_hist.get(day - timedelta(days=1), 0.0)
-    l7 = sales_hist.get(day - timedelta(days=7), l1)
-    rolling_vals = [sales_hist.get(day - timedelta(days=i), l1) for i in range(1, 8)]
-    rolling7 = mean(rolling_vals) if rolling_vals else l1
+    recent_values = [
+        float(v)
+        for d, v in sales_hist.items()
+        if d < day and (day - d).days <= MIN_LAG_HISTORY_DAYS
+    ]
+    recent_fallback = mean(recent_values) if recent_values else 0.0
+
+    l1 = _history_value(sales_hist, day - timedelta(days=1), recent_fallback)
+    l7 = _history_value(sales_hist, day - timedelta(days=7), l1)
+    l14 = _history_value(sales_hist, day - timedelta(days=14), l7)
+    rolling7 = _rolling_mean(sales_hist, day, 7, l1)
+    rolling14 = _rolling_mean(sales_hist, day, 14, rolling7)
 
     temp_c, rain_mm = _resolve_weather_for_day(day, weather)
     temp_prev_7, rain_prev_7 = _resolve_weather_for_day(day - timedelta(days=7), weather)
@@ -121,7 +170,9 @@ def _build_feature_vector(
         1.0 if day.weekday() >= 5 else 0.0,
         float(l1),
         float(l7),
+        float(l14),
         float(rolling7),
+        float(rolling14),
         float(temp_c),
         float(rain_mm),
         float(temp_c - temp_prev_7),
@@ -137,19 +188,25 @@ def _build_feature_vector(
 def _normalize(rows: list[FeatureRow]) -> tuple[list[list[float]], list[float], list[float]]:
     if not rows:
         return [], [], []
+
     n_features = len(rows[0].x)
     means = [mean([r.x[j] for r in rows]) for j in range(n_features)]
     stds = []
+
     for j in range(n_features):
         var = mean([(r.x[j] - means[j]) ** 2 for r in rows])
-        std = var ** 0.5
+        std = var**0.5
         stds.append(std if std > 1e-9 else 1.0)
+
     xs = [[(r.x[j] - means[j]) / stds[j] for j in range(n_features)] for r in rows]
     return xs, means, stds
 
 
 def _gradient_descent(
-    xs: list[list[float]], ys: list[float], lr: float = 0.01, epochs: int = 1500
+    xs: list[list[float]],
+    ys: list[float],
+    lr: float = 0.01,
+    epochs: int = 300,
 ) -> tuple[float, list[float]]:
     if not xs:
         return 0.0, [0.0] * len(FEATURE_NAMES)
@@ -162,6 +219,7 @@ def _gradient_descent(
     for _ in range(epochs):
         grad_w = [0.0] * n_features
         grad_b = 0.0
+
         for x, y in zip(xs, ys):
             pred = b + sum(w[j] * x[j] for j in range(n_features))
             err = pred - y
@@ -178,21 +236,68 @@ def _gradient_descent(
 
     return b, w
 
-
-def _predict(
-    b: float, w: list[float], x_raw: list[float], means: list[float], stds: list[float]
+def _predict_transformed(
+    b: float,
+    w: list[float],
+    x_raw: list[float],
+    means: list[float],
+    stds: list[float],
 ) -> float:
     x = [(x_raw[j] - means[j]) / stds[j] for j in range(len(w))]
     return b + sum(w[j] * x[j] for j in range(len(w)))
 
 
+def _predict_revenue(
+    b: float,
+    w: list[float],
+    x_raw: list[float],
+    means: list[float],
+    stds: list[float],
+) -> float:
+    pred_transformed = _predict_transformed(b, w, x_raw, means, stds)
+    return _target_decode(pred_transformed)
+
+
+def _stabilize_prediction(
+    pred: float,
+    sales_hist: dict[date, float],
+    day: date,
+) -> float:
+    if not isfinite(pred):
+        pred = 0.0
+
+    history_days = sorted(d for d in sales_hist if d < day)
+    if not history_days:
+        return max(0.0, float(pred))
+
+    last28_days = history_days[-28:]
+    last28_values = [float(sales_hist[d]) for d in last28_days]
+    base_28 = mean(last28_values) if last28_values else 0.0
+
+    last7_value = sales_hist.get(day - timedelta(days=7))
+    seasonal_base = float(last7_value) if last7_value is not None else float(base_28)
+
+    blended = 0.7 * float(pred) + 0.3 * seasonal_base
+
+    floor = max(0.0, base_28 * 0.55)
+    ceiling = base_28 * 1.80
+
+    return float(min(max(blended, floor), ceiling))
+
+
 def _metrics(
-    rows: list[FeatureRow], b: float, w: list[float], means: list[float], stds: list[float]
+    rows: list[FeatureRow],
+    b: float,
+    w: list[float],
+    means: list[float],
+    stds: list[float],
 ) -> tuple[float, float]:
     if not rows:
         return 0.0, 0.0
-    preds = [_predict(b, w, r.x, means, stds) for r in rows]
-    ys = [r.y for r in rows]
+
+    preds = [_predict_revenue(b, w, r.x, means, stds) for r in rows]
+    ys = [_target_decode(r.y) for r in rows]
+
     mae = sum(fabs(y - p) for y, p in zip(ys, preds)) / len(ys)
     denom = [max(fabs(y), 1.0) for y in ys]
     mape = sum(fabs(y - p) / d for y, p, d in zip(ys, preds, denom)) / len(ys)
@@ -211,15 +316,28 @@ def _load_context(db, org_id: str, site_id: str):
         .where(Sale.org_id == org_id, Sale.site_id == site_id)
         .order_by(Sale.day.asc())
     ).scalars().all()
+
     weather_rows = db.execute(
-        select(WeatherDaily).where(WeatherDaily.org_id == org_id, WeatherDaily.site_id == site_id)
+        select(WeatherDaily).where(
+            WeatherDaily.org_id == org_id,
+            WeatherDaily.site_id == site_id,
+        )
     ).scalars().all()
+
     traffic_rows = db.execute(
-        select(TrafficDaily).where(TrafficDaily.org_id == org_id, TrafficDaily.site_id == site_id)
+        select(TrafficDaily).where(
+            TrafficDaily.org_id == org_id,
+            TrafficDaily.site_id == site_id,
+        )
     ).scalars().all()
+
     staffing_rows = db.execute(
-        select(StaffingDaily).where(StaffingDaily.org_id == org_id, StaffingDaily.site_id == site_id)
+        select(StaffingDaily).where(
+            StaffingDaily.org_id == org_id,
+            StaffingDaily.site_id == site_id,
+        )
     ).scalars().all()
+
     event_rows = db.execute(
         select(EventDaily)
         .where(EventDaily.org_id == org_id)
@@ -230,6 +348,7 @@ def _load_context(db, org_id: str, site_id: str):
     weather = {r.day: (r.temp_c, r.rain_mm) for r in weather_rows}
     traffic = {r.day: float(r.traffic_index) for r in traffic_rows}
     staffing = {r.day: int(r.staff_count) for r in staffing_rows}
+
     events: dict[date, float] = {}
     for r in event_rows:
         events[r.day] = events.get(r.day, 0.0) + float(r.intensity)
@@ -281,46 +400,126 @@ def _fetch_live_future_weather(site: Site) -> dict[date, tuple[float | None, flo
     return rows
 
 
+def _make_training_rows(
+    sales_rows: list[Sale],
+    sales_hist: dict[date, float],
+    weather: dict[date, tuple[float | None, float | None]],
+    traffic: dict[date, float],
+    staffing: dict[date, int],
+    events: dict[date, float],
+    surface_m2: int | None,
+    category: str | None,
+) -> list[FeatureRow]:
+    rows: list[FeatureRow] = []
+
+    for s in sales_rows:
+        history_count = len(
+            [d for d in sales_hist if d < s.day and (s.day - d).days <= MIN_LAG_HISTORY_DAYS]
+        )
+        if history_count < 7:
+            continue
+
+        rows.append(
+            FeatureRow(
+                day=s.day,
+                y=_target_encode(float(s.revenue_eur)),
+                x=_build_feature_vector(
+                    s.day,
+                    sales_hist,
+                    weather,
+                    traffic,
+                    staffing,
+                    events,
+                    surface_m2,
+                    category,
+                ),
+            )
+        )
+
+    return rows
+
+
+def _fit_model_from_rows(rows: list[FeatureRow]) -> tuple[float, list[float], list[float], list[float]]:
+    xs_train, means, stds = _normalize(rows)
+    ys_train = [r.y for r in rows]
+    b, w = _gradient_descent(xs_train, ys_train)
+    return b, w, means, stds
+
+
+def _fit_model_from_history(
+    sales_rows: list[Sale],
+    sales_hist: dict[date, float],
+    weather: dict[date, tuple[float | None, float | None]],
+    traffic: dict[date, float],
+    staffing: dict[date, int],
+    events: dict[date, float],
+    surface_m2: int | None,
+    category: str | None,
+) -> tuple[float, list[float], list[float], list[float], list[FeatureRow]]:
+    rows = _make_training_rows(
+        sales_rows,
+        sales_hist,
+        weather,
+        traffic,
+        staffing,
+        events,
+        surface_m2,
+        category,
+    )
+    if len(rows) < MIN_TRAIN_HISTORY_DAYS:
+        raise ValueError("need at least 28 usable sales rows to train")
+    b, w, means, stds = _fit_model_from_rows(rows)
+    return b, w, means, stds, rows
+
+
 def train_site_model(db, org_id: str, site_id: str) -> ModelRun:
     site, sales_rows, sales_hist, weather, traffic, staffing, events = _load_context(
         db, org_id, site_id
     )
-    if len(sales_rows) < 14:
-        raise ValueError("need at least 14 sales rows to train")
 
-    rows = [
-        FeatureRow(
-            day=s.day,
-            y=float(s.revenue_eur),
-            x=_build_feature_vector(
-                s.day,
-                sales_hist,
-                weather,
-                traffic,
-                staffing,
-                events,
-                site.surface_m2,
-                site.category,
-            ),
-        )
-        for s in sales_rows
-    ]
+    if len(sales_rows) < MIN_TRAIN_HISTORY_DAYS:
+        raise ValueError("need at least 28 sales rows to train")
 
-    split = max(2, int(len(rows) * 0.8))
+    rows = _make_training_rows(
+        sales_rows,
+        sales_hist,
+        weather,
+        traffic,
+        staffing,
+        events,
+        site.surface_m2,
+        site.category,
+    )
+
+    if len(rows) < MIN_TRAIN_HISTORY_DAYS:
+        raise ValueError("need at least 28 usable sales rows to train")
+
+    split = max(MIN_LAG_HISTORY_DAYS, int(len(rows) * 0.8))
+    if split >= len(rows):
+        split = len(rows) - 7
+    if split <= 0:
+        raise ValueError("not enough history after warmup to train")
+
     train_rows = rows[:split]
-    eval_rows = rows[split:] if split < len(rows) else rows[-2:]
+    eval_rows = rows[split:]
+    if not eval_rows:
+        eval_rows = rows[-7:]
 
-    xs_train, means, stds = _normalize(train_rows)
-    ys_train = [r.y for r in train_rows]
-
-    b, w = _gradient_descent(xs_train, ys_train)
+    b, w, means, stds = _fit_model_from_rows(train_rows)
     mae, mape = _metrics(eval_rows, b, w, means, stds)
 
-    payload = {"names": FEATURE_NAMES, "means": means, "stds": stds}
+    payload = {
+        "names": FEATURE_NAMES,
+        "means": means,
+        "stds": stds,
+        "target_transform": TARGET_TRANSFORM,
+        "min_lag_history_days": MIN_LAG_HISTORY_DAYS,
+    }
+
     run = ModelRun(
         org_id=org_id,
         site_id=site_id,
-        model_name="linear_gd_weather_v2",
+        model_name="linear_gd_log1p_lag14_v2",
         train_rows=len(train_rows),
         mae=mae,
         mape=mape,
@@ -372,7 +571,6 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
     db.query(ForecastPoint).filter(
         ForecastPoint.org_id == org_id,
         ForecastPoint.site_id == site_id,
-        ForecastPoint.model_run_id == run.id,
     ).delete()
     db.commit()
 
@@ -396,8 +594,12 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
             site.surface_m2,
             site.category,
         )
-        pred = max(0.0, float(_predict(intercept, weights, x_raw, means, stds)))
-        sales_hist[day] = pred
+
+        raw_pred = max(0.0, float(_predict_revenue(intercept, weights, x_raw, means, stds)))
+        pred = _stabilize_prediction(raw_pred, sales_hist, day)
+
+        proxy_value = sales_hist.get(day - timedelta(days=7), sales_hist.get(anchor_day, 0.0))
+        sales_hist[day] = float(proxy_value)
 
         db.add(
             ForecastPoint(
@@ -409,6 +611,7 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
                 predicted_revenue_eur=pred,
             )
         )
+
         preds.append(
             {
                 "day": day.isoformat(),
@@ -416,9 +619,11 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
                 "weather": {
                     "temp_c": float(weather[day][0]) if weather[day][0] is not None else None,
                     "rain_mm": float(weather[day][1]) if weather[day][1] is not None else None,
-                    "source": "live_forecast"
-                    if day in future_weather_live and day >= today_utc
-                    else "historical_baseline",
+                    "source": (
+                        "live_forecast"
+                        if day in future_weather_live and day >= today_utc
+                        else "historical_baseline"
+                    ),
                 },
             }
         )
@@ -436,10 +641,22 @@ def forecast_site(db, org_id: str, site_id: str, horizon_days: int, model_run_id
             "mae": run.mae,
             "mape": run.mape,
             "features": feature_payload.get("names", FEATURE_NAMES),
+            "target_transform": feature_payload.get("target_transform", TARGET_TRANSFORM),
         },
         "forecast": preds,
         "sum_predicted_eur": float(sum(p["predicted_revenue_eur"] for p in preds)),
     }
+
+
+def _build_partial_sales_inputs(
+    sales_rows: list[Sale],
+    cutoff_day: date,
+) -> tuple[list[Sale], dict[date, float]]:
+    partial_rows = [s for s in sales_rows if s.day <= cutoff_day]
+    partial_hist = {s.day: float(s.revenue_eur) for s in partial_rows}
+    return partial_rows, partial_hist
+
+
 def backtest_site(
     db,
     org_id: str,
@@ -447,70 +664,100 @@ def backtest_site(
     horizon_days: int = 7,
     model_run_id: str | None = None,
 ):
+    started_at = time.time()
+
+    if horizon_days < 1:
+        raise ValueError("horizon_days must be >= 1")
+
     site, sales_rows, sales_hist, weather, traffic, staffing, events = _load_context(
         db, org_id, site_id
     )
 
-    if len(sales_rows) < 30:
+    if len(sales_rows) < 45:
         raise ValueError("not enough history for backtest")
 
-    if model_run_id:
-        run = db.execute(
-            select(ModelRun).where(
-                ModelRun.id == model_run_id,
-                ModelRun.org_id == org_id,
-                ModelRun.site_id == site_id,
-            )
-        ).scalar_one_or_none()
-    else:
-        run = db.execute(
-            select(ModelRun)
-            .where(ModelRun.org_id == org_id, ModelRun.site_id == site_id)
-            .order_by(ModelRun.id.desc())
-        ).scalars().first()
+    candidate_windows: list[tuple[int, Sale]] = []
+    max_anchor_idx = len(sales_rows) - horizon_days - 1
+    if max_anchor_idx <= MIN_TRAIN_HISTORY_DAYS:
+        raise ValueError("not enough history for backtest")
 
-    if not run:
-        run = train_site_model(db, org_id, site_id)
+    start_anchor_idx = MIN_TRAIN_HISTORY_DAYS
 
-    weights = [float(v) for v in json.loads(run.weights_json)]
-    payload = json.loads(run.features_json)
+    for anchor_idx in range(start_anchor_idx, max_anchor_idx + 1):
+        candidate_windows.append((anchor_idx, sales_rows[anchor_idx]))
 
-    means = payload.get("means")
-    stds = payload.get("stds")
-    intercept = float(run.intercept)
+    if len(candidate_windows) > BACKTEST_MAX_WINDOWS:
+        candidate_windows = candidate_windows[-BACKTEST_MAX_WINDOWS:]
 
     errors = []
     rows = []
 
-    for s in sales_rows[:-horizon_days]:
-        target_day = s.day + timedelta(days=horizon_days)
+    for anchor_idx, anchor_sale in candidate_windows:
+        anchor_day = anchor_sale.day
+        target_day = anchor_day + timedelta(days=horizon_days)
 
         if target_day not in sales_hist:
             continue
 
-        x_raw = _build_feature_vector(
-            target_day,
-            sales_hist,
-            weather,
-            traffic,
-            staffing,
-            events,
-            site.surface_m2,
-            site.category,
-        )
+        partial_sales_rows, partial_sales_hist = _build_partial_sales_inputs(sales_rows, anchor_day)
 
-        pred = max(0.0, _predict(intercept, weights, x_raw, means, stds))
-        real = sales_hist[target_day]
+        try:
+            b, w, means, stds, used_rows = _fit_model_from_history(
+                partial_sales_rows,
+                partial_sales_hist,
+                weather,
+                traffic,
+                staffing,
+                events,
+                site.surface_m2,
+                site.category,
+            )
+        except ValueError:
+            continue
 
-        err = real - pred
+        simulated_hist = dict(partial_sales_hist)
+
+        pred = 0.0
+
+        for step in range(1, horizon_days + 1):
+            forecast_day = anchor_day + timedelta(days=step)
+
+            if forecast_day not in weather:
+                baseline_temp, baseline_rain = _historical_weather_baseline(weather, forecast_day)
+                weather[forecast_day] = (baseline_temp, baseline_rain)
+
+            x_raw = _build_feature_vector(
+                forecast_day,
+                simulated_hist,
+                weather,
+                traffic,
+                staffing,
+                events,
+                site.surface_m2,
+                site.category,
+            )
+
+            raw_pred = max(0.0, float(_predict_revenue(b, w, x_raw, means, stds)))
+            pred = _stabilize_prediction(raw_pred, simulated_hist, forecast_day)
+
+            proxy_value = simulated_hist.get(
+                forecast_day - timedelta(days=7),
+                simulated_hist.get(anchor_day, 0.0),
+            )
+            simulated_hist[forecast_day] = float(proxy_value)
+
+        real = float(sales_hist[target_day])
+        err = real - float(pred)
+
         errors.append(abs(err))
-
         rows.append(
             {
+                "anchor_day": anchor_day.isoformat(),
                 "day": target_day.isoformat(),
-                "real": float(real),
+                "real": real,
                 "pred": float(pred),
                 "error": float(err),
+                "train_rows": len(used_rows),
             }
         )
 
@@ -521,12 +768,30 @@ def backtest_site(
         else 0.0
     )
 
+    latest_run = None
+    if model_run_id:
+        latest_run = db.execute(
+            select(ModelRun).where(
+                ModelRun.id == model_run_id,
+                ModelRun.org_id == org_id,
+                ModelRun.site_id == site_id,
+            )
+        ).scalar_one_or_none()
+    if not latest_run:
+        latest_run = db.execute(
+            select(ModelRun)
+            .where(ModelRun.org_id == org_id, ModelRun.site_id == site_id)
+            .order_by(ModelRun.id.desc())
+        ).scalars().first()
+
     return {
         "site_id": site_id,
         "horizon_days": horizon_days,
-        "model_run_id": run.id,
-        "model_name": run.model_name,
+        "model_run_id": latest_run.id if latest_run else None,
+        "model_name": latest_run.model_name if latest_run else "walk_forward_internal",
         "mae": float(mae),
         "mape": float(mape),
+        "windows_tested": len(rows),
+        "elapsed_seconds": round(time.time() - started_at, 2),
         "rows": rows[-30:],
     }
